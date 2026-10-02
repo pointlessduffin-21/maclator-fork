@@ -1,0 +1,194 @@
+{
+  "host": "Intel Core i5-10310U (4 cores / 8 threads), Intel UHD Graphics, macOS 26.6",
+  "apps": [
+    {
+      "name": "AppCleaner",
+      "bundleID": "net.freemacsoft.AppCleaner",
+      "verdict": "works",
+      "note": "Objective-C/AppKit. Window after about 40 s on the first launch.",
+      "firstWindow": 40,
+      "tested": "2026-10-02"
+    },
+    {
+      "name": "ChatGPT",
+      "bundleID": "com.openai.codex",
+      "verdict": "works",
+      "note": "Chromium-based, arm64 only (no Intel version). Needs --no-sandbox; window after about 2 minutes on the first launch.",
+      "tested": "2026-10-02",
+      "firstWindow": 124
+    },
+    {
+      "name": "coconutBattery",
+      "bundleID": "com.coconut-flavour.coconutBattery",
+      "verdict": "works",
+      "note": "Swift/AppKit. Battery readings not checked.",
+      "firstWindow": 26,
+      "tested": "2026-10-02"
+    },
+    {
+      "name": "Final Cut Pro",
+      "bundleID": "com.apple.FinalCutApp",
+      "verdict": "works",
+      "note": "Sandboxed. Editing and rendering not checked.",
+      "tested": "2026-10-02",
+      "firstWindow": 87
+    },
+    {
+      "name": "FluxMarkdown",
+      "bundleID": "com.xykong.Markdown",
+      "verdict": "works",
+      "note": "Swift.",
+      "firstWindow": 8,
+      "tested": "2026-10-02"
+    },
+    {
+      "name": "foobar2000",
+      "bundleID": "com.foobar2000.mac",
+      "verdict": "works",
+      "note": "C++/AppKit.",
+      "firstWindow": 15,
+      "tested": "2026-10-02"
+    },
+    {
+      "name": "Google Chrome",
+      "bundleID": "com.google.Chrome",
+      "verdict": "works",
+      "note": "Chromium 154. Needs --no-sandbox.",
+      "tested": "2026-10-02",
+      "firstWindow": 29
+    },
+    {
+      "name": "HandBrake",
+      "bundleID": "fr.handbrake.HandBrake",
+      "verdict": "works",
+      "note": "Sandboxed, but starts. Encoding not checked.",
+      "firstWindow": 36,
+      "tested": "2026-10-02"
+    },
+    {
+      "name": "Hidden Bar",
+      "bundleID": "com.dwarvesv.minimalbar",
+      "verdict": "works",
+      "note": "Swift, sandboxed, from the App Store.",
+      "firstWindow": 8,
+      "tested": "2026-10-02"
+    },
+    {
+      "name": "Keynote",
+      "bundleID": "com.apple.Keynote",
+      "verdict": "works",
+      "note": "As Pages.",
+      "tested": "2026-10-02",
+      "firstWindow": 20
+    },
+    {
+      "name": "Microsoft Excel",
+      "bundleID": "com.microsoft.Excel",
+      "verdict": "works",
+      "note": "Sandboxed.",
+      "tested": "2026-10-02",
+      "firstWindow": 15
+    },
+    {
+      "name": "Microsoft OneNote",
+      "bundleID": "com.microsoft.onenote.mac",
+      "verdict": "works",
+      "note": "Needed thread_suspend/get_state for JavaScriptCore's GC (now emulated).",
+      "tested": "2026-10-02",
+      "firstWindow": 19
+    },
+    {
+      "name": "Microsoft PowerPoint",
+      "bundleID": "com.microsoft.Powerpoint",
+      "verdict": "works",
+      "note": "Sandboxed.",
+      "tested": "2026-10-02",
+      "firstWindow": 21
+    },
+    {
+      "name": "Microsoft Word",
+      "bundleID": "com.microsoft.Word",
+      "verdict": "works",
+      "note": "Sandboxed. Documents not checked.",
+      "tested": "2026-10-02",
+      "firstWindow": 26
+    },
+    {
+      "name": "Mos",
+      "bundleID": "com.caldis.Mos",
+      "verdict": "works",
+      "note": "Swift. Scroll smoothing itself not checked (needs the Accessibility permission).",
+      "firstWindow": 12,
+      "tested": "2026-10-02"
+    },
+    {
+      "name": "Numbers",
+      "bundleID": "com.apple.Numbers",
+      "verdict": "works",
+      "note": "As Pages.",
+      "tested": "2026-10-02",
+      "firstWindow": 16
+    },
+    {
+      "name": "Pages",
+      "bundleID": "com.apple.Pages",
+      "verdict": "works",
+      "note": "Needed the guest's own entitlements (CloudKit traps without them). High CPU at idle; iCloud not checked.",
+      "tested": "2026-10-02",
+      "firstWindow": 15
+    },
+    {
+      "name": "Pixelmator Pro",
+      "bundleID": "com.pixelmatorteam.pixelmator.x",
+      "verdict": "works",
+      "note": "Relaunches itself on start; the second copy opens the window.",
+      "tested": "2026-10-02"
+    },
+    {
+      "name": "Termius",
+      "bundleID": "com.termius-dmg.mac",
+      "verdict": "works",
+      "note": "Electron. Window after about 2.5 minutes on the first launch.",
+      "firstWindow": 145,
+      "tested": "2026-10-02"
+    },
+    {
+      "name": "VLC",
+      "bundleID": "org.videolan.vlc",
+      "verdict": "works",
+      "note": "Playback not checked.",
+      "firstWindow": 10,
+      "tested": "2026-10-02"
+    },
+    {
+      "name": "Windows App",
+      "bundleID": "com.microsoft.rdc.macos",
+      "verdict": "works",
+      "note": "Sandboxed. Remote sessions not checked.",
+      "tested": "2026-10-02",
+      "firstWindow": 11
+    },
+    {
+      "name": "Ghostty",
+      "bundleID": "com.mitchellh.ghostty",
+      "verdict": "partial",
+      "note": "Opens a window and runs its event loop; whether the terminal draws is unconfirmed (it renders through CAMetalLayer, which the GPU bridge doesn't cover yet).",
+      "firstWindow": 8,
+      "tested": "2026-10-02"
+    },
+    {
+      "name": "OneDrive",
+      "bundleID": "com.microsoft.OneDrive",
+      "verdict": "partial",
+      "note": "Menu-bar app: starts and keeps running; no window to check.",
+      "tested": "2026-10-02"
+    },
+    {
+      "name": "RDM",
+      "bundleID": "net.alkalay.RDM",
+      "verdict": "partial",
+      "note": "Menu-bar app: starts and stays running; the menu itself not checked yet.",
+      "tested": "2026-10-02"
+    }
+  ]
+}
