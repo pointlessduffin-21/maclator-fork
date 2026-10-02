@@ -125,22 +125,44 @@ pub fn intercept(msg_addr: u64, options: u64) -> bool {
             }
         }
     }
-    // Thread suspend/resume/get_state on guest threads (Chromium's stack-sampling profiler).
-    // Host threads run guest code, so suspending one can deadlock the whole process and the
-    // host register state is meaningless to the guest: make suspend/resume no-ops and
-    // get_state a failure.
+    // thread_suspend / thread_resume / thread_get_state (JavaScriptCore's GC, Chromium's stack
+    // sampler). For guest threads they are emulated cooperatively (suspend.rs); for other
+    // threads suspend/resume stay no-ops and get_state fails, as host threads run guest code and
+    // the host register state is meaningless to the guest.
     if msg_addr != 0 && options & 3 == 3 {
         let m = msg_addr as *mut u32;
         unsafe {
             let id = *m.add(5);
+            let rport = *m.add(2);
             let lport = *m.add(3);
             match id {
-                3605 | 3606 => {
+                3605 => {
+                    crate::suspend::suspend(rport);
                     write_error_reply(m, id, lport, KERN_SUCCESS);
                     return true;
                 }
+                3606 => {
+                    let kr = match crate::suspend::resume(rport) {
+                        Some(Err(())) => 5, // KERN_FAILURE: not suspended
+                        _ => KERN_SUCCESS,
+                    };
+                    write_error_reply(m, id, lport, kr);
+                    return true;
+                }
                 3603 => {
-                    write_error_reply(m, id, lport, 5 /* KERN_FAILURE */);
+                    // Request: header, NDR, flavor, old_stateCnt.
+                    let (flavor, max) = (*m.add(8), *m.add(9));
+                    match crate::suspend::get_state(rport, flavor, max) {
+                        Some(Ok(words)) => {
+                            // Reply: header, NDR, RetCode, old_stateCnt, old_state[cnt].
+                            write_error_reply(m, id, lport, KERN_SUCCESS);
+                            *m.add(1) = 40 + 4 * words.len() as u32;
+                            *m.add(9) = words.len() as u32;
+                            std::ptr::copy_nonoverlapping(words.as_ptr(), m.add(10), words.len());
+                        }
+                        Some(Err(kr)) => write_error_reply(m, id, lport, kr),
+                        None => write_error_reply(m, id, lport, 5 /* KERN_FAILURE */),
+                    }
                     return true;
                 }
                 _ => {}

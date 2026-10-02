@@ -116,13 +116,22 @@ pub fn bsdthread_create(a: &[u64; 8]) -> Result<u64, u64> {
     }
     cpu.x[5] = fl;
     cpu.x[31] = stack;
+    // As in the kernel, the new thread's port is in its pthread before bsdthread_create returns:
+    // written by the creator, since by the time the new thread could write it the creator may
+    // already have freed the pthread (a process tearing down).
+    let (port_tx, port_rx) = std::sync::mpsc::channel::<u64>();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
     spawn_guest(cpu, move |c| {
         let port = unsafe { libc::mach_thread_self() } as u64;
         c.x[1] = port;
-        if tsd_off != 0 && mts_off != 0 {
-            unsafe { *((pthread + tsd_off + mts_off) as *mut u64) = port };
-        }
+        let _ = port_tx.send(port);
+        let _ = go_rx.recv();
     });
+    let port = port_rx.recv().map_err(|_| libc::EAGAIN as u64)?;
+    if tsd_off != 0 && mts_off != 0 {
+        unsafe { *((pthread + tsd_off + mts_off) as *mut u64) = port };
+    }
+    let _ = go_tx.send(());
     Ok(pthread)
 }
 

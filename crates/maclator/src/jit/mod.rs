@@ -28,8 +28,8 @@ impl std::hash::Hasher for Fx {
     }
 }
 type FastMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<Fx>>;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 /// Entries in each thread's indirect-branch translation cache.
 pub const IBTC_SIZE: usize = 32768;
@@ -79,7 +79,88 @@ pub struct CodeCache {
 
 static CODE: OnceLock<CodeCache> = OnceLock::new();
 /// guest pc -> host code
-static BLOCKS: RwLock<Option<FastMap<u64, u64>>> = RwLock::new(None);
+static BLOCKS: SpinRw<Option<FastMap<u64, u64>>> = SpinRw::new(None);
+
+/// Reader/writer spin lock. Unlike `std::sync::RwLock` (which on macOS queues waiting threads
+/// and wakes them through per-thread semaphores) it keeps no record of waiters, so it is
+/// fork-safe: a forked child never tries to wake threads that only exist in the parent.
+/// Critical sections are a hash lookup or insert.
+pub struct SpinRw<T> {
+    state: AtomicU32,
+    data: std::cell::UnsafeCell<T>,
+}
+unsafe impl<T: Send> Sync for SpinRw<T> {}
+
+const RW_WRITER: u32 = 1 << 31;
+/// A writer is waiting: new readers back off so writers can't starve.
+const RW_PENDING: u32 = 1 << 30;
+
+pub struct SpinRead<'a, T>(&'a SpinRw<T>);
+pub struct SpinWrite<'a, T>(&'a SpinRw<T>);
+
+impl<T> SpinRw<T> {
+    pub const fn new(v: T) -> Self {
+        SpinRw { state: AtomicU32::new(0), data: std::cell::UnsafeCell::new(v) }
+    }
+    pub fn read(&self) -> SpinRead<'_, T> {
+        let mut spins = 0u32;
+        loop {
+            let s = self.state.load(Ordering::Relaxed);
+            if s & (RW_WRITER | RW_PENDING) == 0 && self.state.compare_exchange_weak(s, s + 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+                return SpinRead(self);
+            }
+            spin_wait(&mut spins);
+        }
+    }
+    pub fn write(&self) -> SpinWrite<'_, T> {
+        let mut spins = 0u32;
+        loop {
+            self.state.fetch_or(RW_PENDING, Ordering::Relaxed);
+            if self.state.compare_exchange_weak(RW_PENDING, RW_WRITER, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+                return SpinWrite(self);
+            }
+            spin_wait(&mut spins);
+        }
+    }
+}
+
+fn spin_wait(spins: &mut u32) {
+    *spins += 1;
+    if *spins < 64 {
+        std::hint::spin_loop();
+    } else {
+        std::thread::yield_now();
+    }
+}
+
+impl<T> std::ops::Deref for SpinRead<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        unsafe { &*self.0.data.get() }
+    }
+}
+impl<T> Drop for SpinRead<'_, T> {
+    fn drop(&mut self) {
+        self.0.state.fetch_sub(1, Ordering::Release);
+    }
+}
+impl<T> std::ops::Deref for SpinWrite<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        unsafe { &*self.0.data.get() }
+    }
+}
+impl<T> std::ops::DerefMut for SpinWrite<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe { &mut *self.0.data.get() }
+    }
+}
+impl<T> Drop for SpinWrite<'_, T> {
+    fn drop(&mut self) {
+        // Clears RW_PENDING too; a still-waiting writer sets it again on its next attempt.
+        self.0.state.store(0, Ordering::Release);
+    }
+}
 static TRANSLATE: Mutex<()> = Mutex::new(());
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 pub static JIT_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -158,12 +239,12 @@ impl CodeCache {
 }
 
 pub fn lookup(pc: u64) -> Option<u64> {
-    BLOCKS.read().unwrap().as_ref().and_then(|m| m.get(&pc).copied())
+    BLOCKS.read().as_ref().and_then(|m| m.get(&pc).copied())
 }
 
 /// Register externally produced code (AOT) for `pc`.
 pub fn register_block(pc: u64, host: u64) {
-    let mut g = BLOCKS.write().unwrap();
+    let mut g = BLOCKS.write();
     g.get_or_insert_with(FastMap::default).entry(pc).or_insert(host);
 }
 
@@ -313,9 +394,27 @@ fn translate_inner(pc: u64) -> u64 {
         ix.pages.entry(page).or_default().push(id);
     }
     drop(ix_guard);
-    let mut g = BLOCKS.write().unwrap();
+    let mut g = BLOCKS.write();
     g.get_or_insert_with(FastMap::default).insert(pc, at);
     at
+}
+
+/// Every lock the JIT (and the AOT recorder it calls) takes, acquired in the order
+/// `translate_inner` nests them. Held across `fork` so the child doesn't inherit a lock owned
+/// by a thread that no longer exists there (the child's first translation would hang forever).
+pub struct ForkLocks {
+    _translate: std::sync::MutexGuard<'static, ()>,
+    _index: std::sync::MutexGuard<'static, Option<JitIndex>>,
+    _aot: crate::aot::ForkLocks,
+    _blocks: SpinWrite<'static, Option<FastMap<u64, u64>>>,
+}
+
+pub fn lock_for_fork() -> ForkLocks {
+    let _translate = TRANSLATE.lock().unwrap();
+    let _index = INDEX.lock().unwrap();
+    let _aot = crate::aot::lock_for_fork();
+    let _blocks = BLOCKS.write();
+    ForkLocks { _translate, _index, _aot, _blocks }
 }
 
 fn lookup_or_translate(pc: u64) -> u64 {
@@ -358,7 +457,7 @@ pub fn invalidate_range(addr: u64, len: u64) {
     if std::env::var_os("MACLATOR_TRACE").is_some() {
         eprintln!("[maclator] invalidating {} units ({:#x}+{:#x})", victims.len(), addr, len);
     }
-    let mut blocks = BLOCKS.write().unwrap();
+    let mut blocks = BLOCKS.write();
     for id in victims {
         let (entry, host) = {
             let u = &mut ix.units[id as usize];
@@ -588,6 +687,7 @@ pub fn run(cpu: &mut Cpu) {
     setup_cpu(cpu);
     let (mut last_pc, mut repeats) = (u64::MAX, 0u64);
     loop {
+        crate::suspend::checkpoint();
         if cpu.pc == last_pc {
             repeats += 1;
             if repeats == 20000 && std::env::var_os("MACLATOR_SPIN_DEBUG").is_some() {

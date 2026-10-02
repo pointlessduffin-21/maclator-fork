@@ -208,6 +208,13 @@ pub fn note_translated(pc: u64) {
     }
 }
 
+/// The AOT recorder's locks, held across `fork` (see `jit::lock_for_fork`).
+pub struct ForkLocks(#[allow(dead_code)] std::sync::MutexGuard<'static, Vec<Image>>, #[allow(dead_code)] std::sync::MutexGuard<'static, Vec<HashSet<u64>>>);
+
+pub fn lock_for_fork() -> ForkLocks {
+    ForkLocks(IMAGES.lock().unwrap(), SEEN.lock().unwrap())
+}
+
 /// Publish this thread's not-yet-flushed blocks (called before saving the profile).
 pub fn flush_pending() {
     let batch = PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()));

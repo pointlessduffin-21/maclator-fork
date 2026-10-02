@@ -47,7 +47,24 @@ Open problems, the bug list (so you recognise symptoms), and a short history.
 - LD4/ST4 element size is bits 11:10 (not 23:22).
 - Two labels at the same address need a `nop` between (iced).
 - Exec-mmap of AOT files triggers Gatekeeper dialogs → copy into the code cache.
-- Chromium hang: profiler `thread_suspend` (msg id 3605) → no-op shim.
+- Chromium hang: profiler `thread_suspend` (msg id 3605) → no-op shim (now replaced by cooperative suspension, below).
+- `maclator: sigreturn without a delivered signal` from bash → `sigreturn(UC_SET_ALT_STACK/UC_RESET_ALT_STACK)` is
+  libplatform's `longjmp` toggling the alt-stack flag; answered with success.
+- Forked child hangs in `jit::translate` (`git fetch`) → JIT/AOT/vpath locks held by threads that don't exist in the
+  child; `fork` now takes them first. The `BLOCKS` `RwLock` was then replaced by a spin lock: std's queue `RwLock`
+  wakes parent-only waiters from the child and dies in `_dispatch_sema4_signal`.
+- `sysctl hw.cputype` (the command) said x86 → only `sysctlbyname` was faked; name2oid/oidfmt/oid2name and the
+  MIB query now answer the overridden names too (Homebrew: "Cannot install on Intel processor").
+- `malloc: nano zone abandoned due to inability to reserve vm space` → host and guest nano zones both live at
+  `0x6000_0000_0000`; maclator re-execs itself with `MallocNanoZone=0` (not passed to the guest).
+- Pages/Numbers/Keynote `os_crash` in CloudKit (`kCKCloudServicesEntitlementKey`) → `csops` about the guest itself
+  now answers from the guest's own signature (entitlements without `app-sandbox`, identity, team ID): `codesign.rs`.
+- OneNote: JavaScriptCore `WTF::Thread::getRegisters` release assert → `thread_suspend/resume/get_state` emulated
+  cooperatively for guest threads (`suspend.rs`).
+- `Library not loaded: …IO80211 … incompatible architecture (have 'x86_64')` → root-patched hosts (OpenCore Legacy
+  Patcher) have x86-only files at system library paths; dyld took them for overrides of the cache. Lookups from
+  dyld's own code now get ENOENT for such files.
+- Universal children ran as x86_64 (`uname -m` in a guest shell) → `--arm64-children` (spawn.rs, with `#!` scripts).
 
 
 ## Session log summary (chronological)

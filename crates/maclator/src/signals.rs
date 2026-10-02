@@ -48,7 +48,8 @@ pub fn sigaction(sig: i32, nsa: u64, osa: u64) -> Result<(), i32> {
         acts[sig as usize] = a;
         // Mirror "ignore" and "default" dispositions on the host so that
         // e.g. SIGPIPE-ignoring programs keep working.
-        let keep_dump = matches!(sig, libc::SIGSEGV | libc::SIGBUS) && std::env::var_os("MACLATOR_DUMP_ON_FAULT").is_some();
+        let keep_dump = (matches!(sig, libc::SIGSEGV | libc::SIGBUS) && std::env::var_os("MACLATOR_DUMP_ON_FAULT").is_some())
+            || sig == crate::suspend::SIG_SUSPEND; // Maclator's own (thread suspension)
         unsafe {
             if keep_dump {
             } else if a.handler == SIG_IGN {

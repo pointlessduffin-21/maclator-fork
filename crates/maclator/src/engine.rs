@@ -83,7 +83,9 @@ pub fn run_thread(cpu: &mut Cpu) {
     EXIT_REQUESTED.with(|f| f.set(false));
     let key = cpu as *mut Cpu as usize;
     CPUS.lock().unwrap().push(key);
+    crate::suspend::register(cpu);
     crate::jit::run(cpu);
+    crate::suspend::unregister();
     CPUS.lock().unwrap().retain(|&k| k != key);
 }
 
@@ -142,7 +144,7 @@ extern "C" fn fault_dump(sig: i32) {
 pub fn handle_exit(cpu: &mut Cpu, e: Exit) -> bool {
     match e {
         Exit::Svc(_) => {
-            crate::syscalls::handle_svc(cpu);
+            crate::suspend::in_syscall(|| crate::syscalls::handle_svc(cpu));
             !EXIT_REQUESTED.with(|f| f.get())
         }
         Exit::IcInvalidate(addr) => {
@@ -165,6 +167,7 @@ pub fn handle_exit(cpu: &mut Cpu, e: Exit) -> bool {
 }
 
 pub fn crash(cpu: &Cpu, why: &str) -> ! {
+    crate::logtee::note(&format!("maclator: {why} at pc {:#x} {}", cpu.pc, crate::symbols::describe(cpu.pc)));
     eprintln!("\nmaclator: {why}");
     eprintln!("  at pc {:#x} {}", cpu.pc, crate::symbols::describe(cpu.pc));
     eprintln!("{}", cpu.dump());
@@ -219,6 +222,7 @@ fn read_insn(a: u64) -> Option<u32> {
 /// Plain interpreter loop (used by `--interp` and as the reference path).
 pub fn interp_loop(cpu: &mut Cpu) {
     loop {
+        crate::suspend::checkpoint();
         match interp::step(cpu) {
             Ok(()) => {}
             Err(e) => {

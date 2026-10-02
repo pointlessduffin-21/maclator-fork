@@ -2,6 +2,7 @@
 
 mod aot;
 mod cache;
+mod codesign;
 mod commpage;
 mod engine;
 mod gpu;
@@ -10,10 +11,12 @@ mod hostsys;
 mod iokit;
 mod jit;
 mod loader;
+mod logtee;
 mod macho;
 mod paths;
 mod signals;
 mod spawn;
+mod suspend;
 mod symbols;
 mod syscalls;
 mod threads;
@@ -31,10 +34,12 @@ fn usage() -> ! {
     eprintln!("  --sysroot DIR   directory with the arm64 dyld shared cache files");
     eprintln!("  --trace         trace system calls");
     eprintln!("  --gpu           route the guest's Metal API to the host GPU");
+    eprintln!("  --arm64-children  run universal child programs and #! scripts as arm64 too");
     std::process::exit(2);
 }
 
 fn main() {
+    avoid_host_nano_zone();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut dyld = std::env::var("MACLATOR_DYLD").unwrap_or_else(|_| "/usr/lib/dyld".to_string());
     while let Some(a) = args.first().cloned() {
@@ -73,6 +78,11 @@ fn main() {
                     usage();
                 }
                 std::env::set_var("MACLATOR_GPU_ONLY", args.remove(0));
+            }
+            "--arm64-children" => {
+                // Universal children and #! scripts run as arm64 too (see spawn.rs).
+                spawn::ARM64_CHILDREN.store(true, Ordering::Relaxed);
+                args.remove(0);
             }
             "--interp" => {
                 jit::JIT_ENABLED.store(false, Ordering::Relaxed);
@@ -142,6 +152,9 @@ fn main() {
         if !jit::JIT_ENABLED.load(Ordering::Relaxed) {
             fwd.push("--interp".into());
         }
+        if spawn::ARM64_CHILDREN.load(Ordering::Relaxed) {
+            fwd.push("--arm64-children".into());
+        }
         if std::env::var_os("MACLATOR_GPU").is_some() {
             fwd.push("--gpu".into());
             if let Ok(o) = std::env::var("MACLATOR_GPU_ONLY") {
@@ -162,11 +175,19 @@ fn main() {
     if std::env::var_os("MACLATOR_TRACE").is_some() {
         syscalls::TRACE.store(true, Ordering::Relaxed);
     }
+    // A `#!` script runs as its interpreter would (`interp [arg] script args...`).
+    if let Some((interp, arg)) = spawn::shebang(&resolve_path(&args[0])) {
+        let script = resolve_path(&args[0]);
+        args.splice(0..1, std::iter::once(interp).chain(arg).chain(std::iter::once(script)));
+    }
     let exe = resolve_path(&args[0]);
+    logtee::init(&std::iter::once(exe.as_str()).chain(args.iter().skip(1).map(String::as_str)).collect::<Vec<_>>().join(" "));
     let gpu_active = std::env::var_os("MACLATOR_GPU").is_some()
         && std::env::var("MACLATOR_GPU_ONLY").map(|o| args.iter().skip(1).any(|a| a.contains(&o))).unwrap_or(true);
     let mut envp: Vec<String> = std::env::vars()
         .filter(|(k, _)| !k.starts_with("MACLATOR_") || matches!(k.as_str(), "MACLATOR_DUMP_ON_FAULT" | "MACLATOR_GPU_BRIDGE" | "MACLATOR_JIT_THRESHOLD" | "MACLATOR_STATS" | "MACLATOR_FALLBACK_HIST"))
+        // MallocNanoZone=0 was only meant for the host (avoid_host_nano_zone).
+        .filter(|(k, _)| !(k == "MallocNanoZone" && std::env::var_os("MACLATOR_NANO_OFF").is_some()))
         .map(|(k, v)| format!("{k}={v}"))
         .collect();
 
@@ -203,6 +224,7 @@ fn main() {
     symbols::add_image(lo.wrapping_add(loaded.main.slide), hi.wrapping_add(loaded.main.slide), exe.rsplit('/').next().unwrap_or(&exe));
     let (lo, hi) = loaded.dyld.macho.vm_range();
     symbols::add_image(lo.wrapping_add(loaded.dyld.slide), hi.wrapping_add(loaded.dyld.slide), "dyld");
+    paths::set_dyld_range(lo.wrapping_add(loaded.dyld.slide), hi.wrapping_add(loaded.dyld.slide));
     if syscalls::TRACE.load(Ordering::Relaxed) {
         eprintln!("[maclator] main at {:#x}, dyld entry {:#x}, sp {:#x}", loaded.main.base, loaded.entry, loaded.sp);
     }
@@ -223,12 +245,27 @@ fn main() {
     std::process::exit(0);
 }
 
+/// arm64 libmalloc puts its nano zone at 0x6000_0000_0000, where the x86-64 host's nano zone
+/// lives too; when the host's region is in the way the guest prints "nano zone abandoned due to
+/// inability to reserve vm space". Re-exec once with the host's nano zone disabled; the guest
+/// environment doesn't get the variable (see the envp filter in main).
+fn avoid_host_nano_zone() {
+    use std::os::unix::process::CommandExt;
+    if std::env::var_os("MallocNanoZone").is_some() || std::env::var_os("MACLATOR_NANO_OFF").is_some() {
+        return;
+    }
+    let Ok(me) = std::env::current_exe() else { return };
+    let err = std::process::Command::new(me).args(std::env::args_os().skip(1)).env("MallocNanoZone", "0").env("MACLATOR_NANO_OFF", "1").exec();
+    eprintln!("maclator: re-exec failed: {err}");
+}
+
 fn resolve_path(p: &str) -> String {
     if p.contains('/') {
         return std::fs::canonicalize(p).map(|x| x.to_string_lossy().into_owned()).unwrap_or_else(|_| p.to_string());
     }
     if let Ok(path) = std::env::var("PATH") {
-        for dir in path.split(':') {
+        // ~/.maclator/shims holds launchers that call maclator (scripts/brew); look past them.
+        for dir in path.split(':').filter(|d| !d.trim_end_matches('/').ends_with("/.maclator/shims")) {
             let cand = format!("{dir}/{p}");
             if std::path::Path::new(&cand).is_file() {
                 return std::fs::canonicalize(&cand).map(|x| x.to_string_lossy().into_owned()).unwrap_or(cand);

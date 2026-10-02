@@ -61,5 +61,13 @@ Processes that are killed (`kill -9`) do not save profiles; quit gracefully (e.g
   rounding/DN/FZ modes are ignored by JIT-native FP (assumes defaults). QC (saturation) flag
   not maintained by native saturating ops. sNaN-vs-qNaN operand priority differs (x86 prefers
   qNaN) — 1 in ~15000 random self-test cases, not seen in practice.
+- **Children**: arm64-only programs started by a guest always run under maclator; with `--arm64-children` so do
+  universal ones and `#!` scripts whose interpreter has an arm64 slice (setuid programs stay native).
+- **Own signature** (`codesign.rs`): `csops`/`csops_audittoken` for the guest's pid report the guest executable's
+  entitlements (minus `com.apple.security.app-sandbox`, which would make libsystem_secinit try to sandbox
+  maclator), identity and team ID. Daemons that check the process by audit token still see maclator.
+- **Thread suspension** (`suspend.rs`): `thread_suspend` waits until the target is in a system call or parked; a
+  thread running guest code is interrupted with SIGINFO and parks in the handler if it was inside translated code,
+  else at the next dispatcher checkpoint. `thread_get_state` returns guest `ARM_THREAD_STATE64`/`ARM_NEON_STATE64`.
 - x86 baseline for JIT is SSE2 + selected SSE4.1/SSSE3 (pshufb, pmin/pmax, pmulld, pmovzx…);
   the Haswell hack and Rosetta (dev Mac) both support these.

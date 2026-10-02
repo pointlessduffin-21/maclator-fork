@@ -92,6 +92,7 @@ pub fn load(exe: &str, dyld_path: &str, argv: &[String], envp: &[String]) -> std
     if main_m.filetype != crate::macho::MH_EXECUTE {
         return Err(std::io::Error::other(format!("{exe}: not an executable")));
     }
+    crate::codesign::load(exe, &main_m);
     let dyld_m = MachO::open_arm64(dyld_path, true)?;
     let main = map_image(exe, &main_m, MAIN_BASE)?;
     let dyld = map_image(dyld_path, &dyld_m, DYLD_BASE)?;

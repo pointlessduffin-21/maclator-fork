@@ -6,12 +6,17 @@
 use crate::hostsys::{self, SysResult};
 use std::ffi::CString;
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 const SYS_EXECVE: u64 = 59;
 
 /// Options to forward to re-launched children (`--sysroot X`, `--dyld D`, ...).
 static FORWARD: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// `--arm64-children`: universal children (and `#!` scripts whose interpreter has an arm64
+/// slice) also run as arm64 under Maclator, like an arm64 parent on Apple Silicon would get them.
+pub static ARM64_CHILDREN: AtomicBool = AtomicBool::new(false);
 
 pub fn configure(flags: Vec<String>) {
     *FORWARD.lock().unwrap() = flags;
@@ -20,13 +25,46 @@ pub fn configure(flags: Vec<String>) {
 const CPU_TYPE_X86_64: u32 = 0x0100_0007;
 const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 
-/// True when `path` is a Mach-O that has an arm64 slice and no x86-64 slice.
-fn arm64_only(path: &str) -> bool {
+/// Whether `path` should run under Maclator rather than natively on the host.
+fn run_as_guest(path: &str) -> bool {
+    match arm64_slices(path) {
+        Some((true, false)) => true,
+        // Universal: only with --arm64-children, and never setuid/setgid programs (they would
+        // lose their privileges when started through maclator).
+        Some((true, true)) => ARM64_CHILDREN.load(Ordering::Relaxed) && !setid(path),
+        _ => false,
+    }
+}
+
+fn setid(path: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).map(|m| m.permissions().mode() & 0o6000 != 0).unwrap_or(true)
+}
+
+/// `#!interpreter [arg]` of a script, as the kernel would parse it.
+pub fn shebang(path: &str) -> Option<(String, Option<String>)> {
     let mut buf = [0u8; 512];
-    let Ok(mut f) = std::fs::File::open(path) else { return false };
-    let Ok(n) = f.read(&mut buf) else { return false };
+    let n = std::fs::File::open(path).ok()?.read(&mut buf).ok()?;
+    if n < 2 || &buf[..2] != b"#!" {
+        return None;
+    }
+    let line = &buf[2..n];
+    let line = &line[..line.iter().position(|&c| c == b'\n')?];
+    let line = std::str::from_utf8(line).ok()?.trim();
+    let (interp, arg) = match line.find([' ', '\t']) {
+        Some(i) => (&line[..i], Some(line[i..].trim()).filter(|a| !a.is_empty())),
+        None => (line, None),
+    };
+    (!interp.is_empty()).then(|| (interp.to_string(), arg.map(str::to_string)))
+}
+
+/// Arm64 / x86-64 slices of a Mach-O (None if `path` is not a Mach-O).
+pub fn arm64_slices(path: &str) -> Option<(bool, bool)> {
+    let mut buf = [0u8; 512];
+    let mut f = std::fs::File::open(path).ok()?;
+    let n = f.read(&mut buf).ok()?;
     if n < 8 {
-        return false;
+        return None;
     }
     let be = |o: usize| u32::from_be_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]);
     let le = |o: usize| u32::from_le_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]);
@@ -44,9 +82,12 @@ fn arm64_only(path: &str) -> bool {
                 _ => {}
             }
         }
-        return arm && !x86;
+        return Some((arm, x86));
     }
-    le(0) == 0xfeed_facf && le(4) == CPU_TYPE_ARM64
+    if le(0) == 0xfeed_facf {
+        return Some((le(4) == CPU_TYPE_ARM64, le(4) == CPU_TYPE_X86_64));
+    }
+    None
 }
 
 unsafe fn cstr(p: u64) -> String {
@@ -111,13 +152,19 @@ pub fn exec_like(n: u64, args: &[u64; 8]) -> SysResult {
     let mut args = *args;
     let _env = scrub_shim(n, &mut args);
     let args = &args;
-    if !arm64_only(&path) {
+    // A script runs as its interpreter would: `interp [arg] script argv[1..]`.
+    let script = if ARM64_CHILDREN.load(Ordering::Relaxed) { shebang(&path).filter(|(i, _)| run_as_guest(i)) } else { None };
+    if script.is_none() && !run_as_guest(&path) {
         return hostsys::unix(n, args);
     }
     let Ok(me) = std::env::current_exe() else { return hostsys::unix(n, args) };
     let argv = unsafe { read_argv(args[aidx]) };
     let mut new_argv: Vec<String> = vec![me.to_string_lossy().into_owned()];
     new_argv.extend(FORWARD.lock().unwrap().iter().cloned());
+    if let Some((interp, arg)) = script {
+        new_argv.push(interp);
+        new_argv.extend(arg);
+    }
     new_argv.push(path);
     new_argv.extend(argv.into_iter().skip(1));
     let cstrs: Vec<CString> = new_argv.iter().filter_map(|s| CString::new(s.as_str()).ok()).collect();

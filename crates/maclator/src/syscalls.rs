@@ -137,6 +137,13 @@ fn bsd(cpu: &mut Cpu, n: u64, mut args: [u64; 8]) {
                 eprintln!("[path] #{n} {orig} -> {full:?}");
             }
             if let Some(full) = full {
+                if crate::paths::in_dyld(cpu.pc) && crate::paths::hides_from_dyld(&full) {
+                    if TRACE.load(Ordering::Relaxed) {
+                        eprintln!("[path] hiding x86-only {full} from dyld (the shared cache has the arm64 one)");
+                    }
+                    set_err(cpu, libc::ENOENT as u64);
+                    return;
+                }
                 if let Some(new) = crate::paths::redirect(&full) {
                     if let Ok(c) = std::ffi::CString::new(new) {
                         args[i] = c.as_ptr() as u64;
@@ -175,10 +182,17 @@ fn bsd_inner(cpu: &mut Cpu, n: u64, mut args: [u64; 8]) {
             // (mach_task_self, MIG reply ports, ...); the JIT reads guest memory through
             // mach_vm_read with the cached task port.
             crate::engine::flush_profile();
+            // Hold the emulator's own locks across fork: other host threads may own them at
+            // this instant, and they don't exist in the child to release them.
+            let jit_locks = crate::jit::lock_for_fork();
+            let vpaths = FD_VPATHS.lock().unwrap();
             let pid = unsafe { libc::fork() };
+            drop(vpaths);
+            drop(jit_locks);
             if pid < 0 {
                 set_err(cpu, unsafe { *libc::__error() } as u64);
             } else if pid == 0 {
+                crate::logtee::reopen_after_fork();
                 // Child: XNU returns the parent's pid with the "is child" flag in x1.
                 set_ok(cpu, unsafe { libc::getppid() } as u64, 1);
             } else {
@@ -204,8 +218,36 @@ fn bsd_inner(cpu: &mut Cpu, n: u64, mut args: [u64; 8]) {
             }
             set_ok(cpu, 0, 0);
         }
+        // write / write_nocancel / writev / writev_nocancel: stdout and stderr are also copied to
+        // the process log (logtee.rs).
+        4 | 397 | 121 | 412 => {
+            let r = hostsys::unix(n, &args);
+            if !r.carry {
+                if matches!(n, 4 | 397) {
+                    crate::logtee::write(args[0], args[1], r.rax);
+                } else {
+                    crate::logtee::writev(args[0], args[1], args[2], r.rax);
+                }
+            }
+            set_res(cpu, r);
+        }
+        // csops / csops_audittoken about the guest itself: answer from the guest's signature.
+        169 | 170 => match crate::codesign::csops(args[0], args[1], args[2], args[3]) {
+            Some(Ok(())) => set_ok(cpu, 0, 0),
+            Some(Err(e)) => set_err(cpu, e as u64),
+            None => {
+                let r = hostsys::unix(n, &args);
+                set_res(cpu, r);
+            }
+        },
         SYS_SIGRETURN => {
-            crate::signals::sigreturn(cpu, args[0], args[1] as i32);
+            // UC_SET_ALT_STACK / UC_RESET_ALT_STACK: libplatform's longjmp only toggles the
+            // on-alt-stack flag (uctx unused); sigaltstack is reported disabled, so nothing to do.
+            if matches!(args[1] as u32, 0x4000_0000 | 0x8000_0000) {
+                set_ok(cpu, 0, 0);
+            } else {
+                crate::signals::sigreturn(cpu, args[0], args[1] as i32);
+            }
         }
         SYS_MMAP => {
             let was_exec = args[2] & PROT_EXEC != 0;
@@ -246,6 +288,9 @@ fn bsd_inner(cpu: &mut Cpu, n: u64, mut args: [u64; 8]) {
             let mib = unsafe { std::slice::from_raw_parts(args[0] as *const i32, (args[1] as usize).min(8)) };
             if args[1] == 2 && mib == [6, 1] {
                 write_sysctl_str(cpu, args[2], args[3], "arm64");
+                return;
+            }
+            if sysctl_mib(cpu, mib, &args) {
                 return;
             }
             let r = hostsys::unix(n, &args);
@@ -423,6 +468,76 @@ fn write_sysctl_int(cpu: &mut Cpu, oldp: u64, oldlenp: u64, v: i64) {
     set_ok(cpu, 0, 0);
 }
 
+/// Top-level MIB number for names Maclator answers itself (unused by XNU, whose dynamic
+/// OIDs start at 100 and stay small).
+const FAKE_CTL: i32 = 0x4D43;
+/// Overridden names handed out through name2oid; the MIB is `[FAKE_CTL, index]`.
+static FAKE_OIDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn overridden(name: &str) -> bool {
+    name == "hw.machine" || sysctl_override(name).is_some()
+}
+
+/// The MIB-based path to the `sysctlbyname` overrides, as used by sysctl(8) and by
+/// sysctlnametomib(): name2oid (`0.3`, name in newp), oid2name (`0.1.<mib>`), oidfmt
+/// (`0.4.<mib>`) and the value query itself. Returns false when the host should answer.
+fn sysctl_mib(cpu: &mut Cpu, mib: &[i32], args: &[u64; 8]) -> bool {
+    let (oldp, oldlenp) = (args[2], args[3]);
+    match mib {
+        [0, 3] => {
+            let name = unsafe { std::slice::from_raw_parts(args[4] as *const u8, args[5] as usize) };
+            let name = String::from_utf8_lossy(name).trim_end_matches('\0').to_string();
+            if !overridden(&name) {
+                return false;
+            }
+            let mut oids = FAKE_OIDS.lock().unwrap();
+            let idx = oids.iter().position(|o| *o == name).unwrap_or_else(|| {
+                oids.push(name);
+                oids.len() - 1
+            });
+            write_sysctl_bytes(cpu, oldp, oldlenp, &[FAKE_CTL.to_ne_bytes(), (idx as i32).to_ne_bytes()].concat());
+        }
+        [0, 1 | 4, FAKE_CTL, idx] | [FAKE_CTL, idx] => {
+            let Some(name) = FAKE_OIDS.lock().unwrap().get(*idx as usize).cloned() else { return false };
+            let string = name == "hw.machine";
+            if mib[0] == 0 && mib[1] == 1 {
+                // oid2name
+                write_sysctl_str(cpu, oldp, oldlenp, &name);
+            } else if mib[0] == 0 {
+                // oidfmt: u32 kind (CTLTYPE_STRING=3 / CTLTYPE_INT=2, CTLFLAG_RD) + format.
+                let kind: u32 = if string { 3 } else { 2 } | 0x8000_0000;
+                let fmt: &[u8] = if string { b"A\0" } else { b"I\0" };
+                write_sysctl_bytes(cpu, oldp, oldlenp, &[&kind.to_ne_bytes()[..], fmt].concat());
+            } else if string {
+                write_sysctl_str(cpu, oldp, oldlenp, "arm64");
+            } else {
+                // Integer sysctls are 4 bytes (sysctl(8) prints every int in the buffer).
+                let v = sysctl_override(&name).unwrap_or(0) as i32;
+                write_sysctl_bytes(cpu, oldp, oldlenp, &v.to_ne_bytes());
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+fn write_sysctl_bytes(cpu: &mut Cpu, oldp: u64, oldlenp: u64, bytes: &[u8]) {
+    unsafe {
+        if oldlenp != 0 {
+            let len = *(oldlenp as *const u64) as usize;
+            if oldp != 0 {
+                if len < bytes.len() {
+                    set_err(cpu, libc::ENOMEM as u64);
+                    return;
+                }
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), oldp as *mut u8, bytes.len());
+            }
+            *(oldlenp as *mut u64) = bytes.len() as u64;
+        }
+    }
+    set_ok(cpu, 0, 0);
+}
+
 /// sysctls whose answer must describe the emulated arm64 machine.
 fn sysctl_override(name: &str) -> Option<i64> {
     Some(match name {
@@ -434,6 +549,8 @@ fn sysctl_override(name: &str) -> Option<i64> {
         "hw.optional.neon" | "hw.optional.AdvSIMD" | "hw.optional.floatingpoint" => 1,
         "hw.optional.armv8_crc32" | "hw.optional.arm.FEAT_CRC32" => 1,
         "hw.optional.armv8_1_atomics" | "hw.optional.arm.FEAT_LSE" => 1,
+        // ARMv8 Crypto: implemented (interpreted); see commpage K_HAS_ARMV8_CRYPTO.
+        "hw.optional.arm.FEAT_AES" | "hw.optional.arm.FEAT_PMULL" | "hw.optional.arm.FEAT_SHA1" | "hw.optional.arm.FEAT_SHA256" => 1,
         "hw.optional.arm.FEAT_LSE2" | "hw.optional.arm.FEAT_LRCPC" | "hw.optional.arm.FEAT_LRCPC2" => 1,
         "hw.optional.arm.FEAT_PAuth" | "hw.optional.arm.FEAT_JSCVT" | "hw.optional.arm.FEAT_FlagM"
         | "hw.optional.arm.FEAT_FlagM2" | "hw.optional.arm.FEAT_DotProd" | "hw.optional.arm.FEAT_FRINTTS"
@@ -442,8 +559,7 @@ fn sysctl_override(name: &str) -> Option<i64> {
         | "hw.optional.arm.FEAT_RDM" | "hw.optional.arm.FEAT_SHA3" | "hw.optional.arm.FEAT_SHA512"
         | "hw.optional.arm.FEAT_SME" | "hw.optional.arm.FEAT_SME2" | "hw.optional.arm.FEAT_BF16"
         | "hw.optional.arm.FEAT_I8MM" | "hw.optional.armv8_2_fhm" | "hw.optional.armv8_2_sha512"
-        | "hw.optional.armv8_2_sha3" | "hw.optional.armv8_3_compnum" | "hw.optional.arm.FEAT_SHA256"
-        | "hw.optional.arm.FEAT_AES" | "hw.optional.arm.FEAT_PMULL" | "hw.optional.arm.FEAT_SHA1"
+        | "hw.optional.armv8_2_sha3" | "hw.optional.armv8_3_compnum"
         | "hw.optional.arm.FEAT_AFP" | "hw.optional.arm.FEAT_RPRES" | "hw.optional.arm.FEAT_ECV"
         | "hw.optional.arm.FEAT_WFxT" | "hw.optional.arm.FEAT_CSSC" | "hw.optional.arm.FEAT_HBC" => 0,
         "hw.pagesize" | "hw.pagesize32" | "vm.pagesize" => 16384,
