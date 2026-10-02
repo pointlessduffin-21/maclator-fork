@@ -13,7 +13,11 @@ maclator [options] ./arm64-binary [args...]
   --no-aot           do not load or save the translation cache
   --trace            log syscalls / Mach messages / path redirections
   --dump-on-fault    on a crash write registers + disassembly to /tmp/maclator-fault-<pid>.log
+  --arm64-children   universal child programs and #! scripts also run as arm64 (as under an arm64
+                     parent on Apple Silicon); setuid programs such as sudo stay native
 ```
+
+The program may also be a `#!` script; it runs under its interpreter's arm64 slice.
 
 More flags, environment variables and signals: [DEBUGGING.md](DEBUGGING.md).
 
@@ -95,3 +99,27 @@ maclator --gpu --gpu-only --type=gpu-process ./App --no-sandbox --disable-gpu-sa
 maclator ./fastfetch
 ELECTRON_RUN_AS_NODE=1 maclator "…/Code" -e "console.log(process.version)"
 ```
+
+## Homebrew
+
+Current Homebrew only supports Apple Silicon on macOS; under Maclator it installs and runs in `/opt/homebrew`
+with arm64 bottles. One-time setup (the `sudo` line is the only step that needs your password):
+
+```bash
+sudo mkdir -p /opt/homebrew && sudo chown $(whoami):admin /opt/homebrew
+NONINTERACTIVE=1 HOMEBREW_NO_SUDO=1 maclator --arm64-children /bin/bash -c \
+  "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+Skip the installer's "Next steps" (`brew shellenv` would put `/opt/homebrew/bin` first on PATH, and its arm64
+programs cannot run natively). Instead use the `brew` wrapper that `scripts/install.sh` puts in `~/bin`, and add
+its launchers *after* the system directories:
+
+```bash
+export PATH="$HOME/bin:$PATH:$HOME/.maclator/shims:/opt/homebrew/bin"
+brew install fastfetch
+fastfetch            # ~/.maclator/shims/fastfetch -> maclator --arm64-children /opt/homebrew/bin/fastfetch
+```
+
+The wrapper refreshes `~/.maclator/shims` after every `brew` command. Each command pays Maclator's start-up cost
+(a few seconds for `brew` itself).

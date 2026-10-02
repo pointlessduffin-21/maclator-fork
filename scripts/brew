@@ -1,0 +1,29 @@
+#!/bin/bash
+# Apple Silicon Homebrew (/opt/homebrew) on an Intel Mac: brew's bash and Ruby run under maclator.
+# After every command, each arm64 program Homebrew linked into /opt/homebrew/{bin,sbin} gets a
+# launcher in ~/.maclator/shims, so it can be typed directly (put that directory on PATH after
+# the system directories, so native tools such as git keep winning over emulated ones).
+MACLATOR=${MACLATOR:-$(dirname "$0")/maclator}
+PREFIX=/opt/homebrew
+SHIMS=${MACLATOR_SHIMS:-$HOME/.maclator/shims}
+[ -x "$PREFIX/bin/brew" ] || { echo "no Homebrew in $PREFIX (see docs/USAGE.md, Homebrew)" >&2; exit 1; }
+"$MACLATOR" --arm64-children "$PREFIX/bin/brew" "$@"
+status=$?
+
+mkdir -p "$SHIMS"
+for s in "$SHIMS"/*; do
+  [ -e "$s" ] || continue
+  n=${s##*/}
+  [ -e "$PREFIX/bin/$n" ] || [ -e "$PREFIX/sbin/$n" ] || rm -f "$s"
+done
+for d in "$PREFIX/sbin" "$PREFIX/bin"; do # bin last: it wins name clashes
+  for f in "$d"/*; do
+    n=${f##*/}
+    [ "$n" = brew ] && continue
+    [ -f "$f" ] && [ -x "$f" ] || continue
+    shim=$(printf '#!/bin/sh\nexec "%s" --arm64-children "%s" "$@"\n' "$MACLATOR" "$f")
+    [ "$(cat "$SHIMS/$n" 2>/dev/null)" = "$shim" ] && continue
+    printf '%s\n' "$shim" > "$SHIMS/$n" && chmod +x "$SHIMS/$n"
+  done
+done
+exit $status
