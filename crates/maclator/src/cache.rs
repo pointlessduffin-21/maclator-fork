@@ -44,6 +44,37 @@ struct MappingSlideNp {
 
 const VM_PROT_ZF: u32 = 0x10;
 
+/// Path of the pre-slid copy of the `n`th mapping of the cache with this UUID. Slid contents
+/// depend on the cache (uuid), where we put it (slide) and the region; all three are in the name.
+fn slid_path(uuid: &[u8; 16], slide: u64, n: usize) -> std::path::PathBuf {
+    let hex: String = uuid.iter().map(|b| format!("{b:02x}")).collect();
+    crate::aot::cache_dir().join(format!("slid-{hex}-{slide:x}-{n}.bin"))
+}
+
+/// Map a pre-slid copy of a region (written by an earlier process) over `addr`, copy-on-write.
+unsafe fn map_slid(path: &std::path::Path, addr: u64, size: usize) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let Ok(f) = std::fs::File::open(path) else { return false };
+    if f.metadata().map(|m| m.len()).unwrap_or(0) != size as u64 {
+        return false;
+    }
+    let p = libc::mmap(addr as *mut _, size, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_FIXED, f.as_raw_fd(), 0);
+    p != libc::MAP_FAILED && p as u64 == addr
+}
+
+/// Write a freshly slid region to its pre-slid file (temp file + rename, so a reader never sees a
+/// partial one). Failures (disk full, read-only cache dir) are ignored: the slide still happened.
+unsafe fn save_slid(path: &std::path::Path, addr: u64, size: usize) {
+    use std::io::Write;
+    let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    let ok = std::fs::File::create(&tmp).and_then(|mut f| f.write_all(std::slice::from_raw_parts(addr as *const u8, size))).is_ok();
+    if ok && std::fs::rename(&tmp, path).is_ok() {
+        return;
+    }
+    let _ = std::fs::remove_file(&tmp);
+}
+
 #[allow(dead_code)]
 fn pread_all(fd: i32, buf: &mut [u8], off: u64) -> bool {
     let mut done = 0usize;
@@ -73,9 +104,16 @@ pub fn map_and_slide_2(files_count: u32, files: u64, mappings_count: u32, mappin
     let slide = CACHE_BASE.wrapping_sub(unslid_base);
     let mut ranges = Vec::new();
     let mut mi = 0usize;
+    // Regions mapped from a pre-slid file (the slide pass skips them), and the UUID of the cache
+    // (read from its header once the first region is mapped) that names those files.
+    let use_slid = std::env::var_os("MACLATOR_NO_SLID").is_none();
+    let mut presl = vec![false; maps.len()];
+    let mut cache_uuid: Option<[u8; 16]> = None;
+    let t_map = std::time::Instant::now();
     for f in files {
         for _ in 0..f.mappings_count {
             let m = maps[mi];
+            let this = mi;
             mi += 1;
             let addr = m.address.wrapping_add(slide);
             let size = m.size as usize;
@@ -92,7 +130,22 @@ pub fn map_and_slide_2(files_count: u32, files: u64, mappings_count: u32, mappin
                     libc::mmap(addr as *mut _, size, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_ANON | libc::MAP_PRIVATE | libc::MAP_FIXED, -1, 0)
                 } else {
                     let wprot = if m.slide_size != 0 { libc::PROT_READ | libc::PROT_WRITE } else { prot.max(libc::PROT_READ) };
-                    libc::mmap(addr as *mut _, size, wprot, libc::MAP_PRIVATE | libc::MAP_FIXED, f.fd, m.file_offset as i64)
+                    if m.slide_size != 0 && use_slid && this > 0 {
+                        // The header (first region) is mapped by now: read the UUID from it.
+                        let u = *cache_uuid.get_or_insert_with(|| {
+                            let mut u = [0u8; 16];
+                            std::ptr::copy_nonoverlapping((CACHE_BASE + 88) as *const u8, u.as_mut_ptr(), 16);
+                            u
+                        });
+                        if map_slid(&slid_path(&u, slide, this), addr, size) {
+                            presl[this] = true;
+                        }
+                    }
+                    if presl[this] {
+                        addr as *mut _
+                    } else {
+                        libc::mmap(addr as *mut _, size, wprot, libc::MAP_PRIVATE | libc::MAP_FIXED, f.fd, m.file_offset as i64)
+                    }
                 };
                 if p == libc::MAP_FAILED || p as u64 != addr {
                     eprintln!("maclator: failed to map shared cache region {:#x}+{:#x}: {}", addr, size, std::io::Error::last_os_error());
@@ -108,15 +161,22 @@ pub fn map_and_slide_2(files_count: u32, files: u64, mappings_count: u32, mappin
     }
     // Second pass: apply slide info. It lives in each file's __LINKEDIT
     // mapping (sms_slide_start is an unslid address), mapped above.
-    for m in maps.iter() {
+    for (i, m) in maps.iter().enumerate() {
         if m.slide_size == 0 {
             continue;
         }
         let addr = m.address.wrapping_add(slide);
-        let info = unsafe { std::slice::from_raw_parts(m.slide_start.wrapping_add(slide) as *const u8, m.slide_size as usize) };
-        if let Err(e) = unsafe { apply_slide_info(info, addr, m.size, slide, unslid_base) } {
-            eprintln!("maclator: slide info: {e}");
-            return libc::EINVAL as i64;
+        if !presl[i] {
+            let info = unsafe { std::slice::from_raw_parts(m.slide_start.wrapping_add(slide) as *const u8, m.slide_size as usize) };
+            if let Err(e) = unsafe { apply_slide_info(info, addr, m.size, slide, unslid_base) } {
+                eprintln!("maclator: slide info: {e}");
+                return libc::EINVAL as i64;
+            }
+            // First process to slide this cache: keep the result for the next ones. Done right
+            // here, before the guest can write to the region.
+            if let (true, Some(u)) = (use_slid && m.max_prot & VM_PROT_ZF == 0, cache_uuid) {
+                unsafe { save_slid(&slid_path(&u, slide, i), addr, m.size as usize) };
+            }
         }
         let prot = (m.init_prot & 3) as i32;
         unsafe { libc::mprotect(addr as *mut _, m.size as usize, if prot == 0 { libc::PROT_NONE } else { prot }) };
