@@ -98,14 +98,16 @@ pub fn register_cache(uuid: [u8; 16], start: u64, end: u64) {
 /// Register the arm64 Mach-O whose header is mapped at `addr` (a dyld-loaded library or
 /// helper image). Keyed by UUID and load address, so it only hits the cache when the
 /// library loads at the same place again.
-pub fn register_image_at(addr: u64) {
+pub fn register_image_at(addr: u64, nonzero_offset: bool) {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
     let rd = |o: u64| unsafe { std::ptr::read_unaligned((addr + o) as *const u32) };
     // mach_header_64: magic, cputype, ..., ncmds at +16, sizeofcmds at +20
     if rd(0) != 0xfeed_facf || rd(4) != 0x0100_000c {
-        if std::env::var_os("MACLATOR_STATS").is_some() {
+        // Executable mappings at a non-zero file offset are usually not headers (only a fat
+        // library's arm64 slice is); don't report those.
+        if !nonzero_offset && std::env::var_os("MACLATOR_STATS").is_some() {
             eprintln!("[maclator] aot: mmap exec at {addr:#x} not an arm64 mach-o ({:#x} {:#x})", rd(0), rd(4));
         }
         return;

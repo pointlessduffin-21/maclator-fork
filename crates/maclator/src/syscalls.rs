@@ -40,6 +40,7 @@ const SYS_EXECVE: u64 = 59;
 const SYS_POSIX_SPAWN: u64 = 244;
 
 const PROT_EXEC: u64 = 4;
+const PROT_READ: u64 = 1;
 const MAP_JIT: u64 = 0x800;
 
 #[inline]
@@ -254,10 +255,13 @@ fn bsd_inner(cpu: &mut Cpu, n: u64, mut args: [u64; 8]) {
             args[2] &= !PROT_EXEC;
             args[3] &= !MAP_JIT;
             let r = mmap_16k(&args);
-            // dyld maps a library's __TEXT (file offset 0, executable) at its final address:
-            // register it with the AOT cache so translations persist across runs.
-            if !r.carry && was_exec && args[5] == 0 && (args[4] as i64) >= 0 && args[1] >= 0x1000 {
-                crate::aot::register_image_at(r.rax);
+            // dyld maps a library's __TEXT (executable, file offset 0 of its slice) at its final
+            // address: register it with the AOT cache so translations persist across runs. In a
+            // fat (universal) library the arm64 slice starts at a non-zero file offset, so the
+            // test is "the mapped bytes start with an arm64 Mach-O header", not "offset 0";
+            // register_image_at checks the header and ignores anything else.
+            if !r.carry && was_exec && args[2] & PROT_READ != 0 && (args[4] as i64) >= 0 && args[1] >= 0x1000 {
+                crate::aot::register_image_at(r.rax, args[5] != 0);
             }
             set_res(cpu, r);
         }
