@@ -1,9 +1,20 @@
 #!/bin/bash
-# Builds Maclator.app (the launcher) into app/out/. Usage: app/build.sh [--install]  (--install copies it to /Applications)
+# Builds Maclator.app (the launcher) into app/out/.
+# Usage: app/build.sh [--bundle] [--install]
+#   --bundle   put maclator and the GPU bridge inside the app (Contents/Resources/bin), for a self-contained release
+#   --install  copy the app to /Applications
 # Needs the Swift toolchain from the Xcode Command Line Tools. The Paper fonts (Instrument Serif, Inter,
 # JetBrains Mono; SIL Open Font License) are downloaded from github.com/google/fonts on the first build.
 set -euo pipefail
 cd "$(dirname "$0")"
+BUNDLE=0; INSTALL=0
+for a in "$@"; do
+  case "$a" in
+    --bundle) BUNDLE=1 ;;
+    --install) INSTALL=1 ;;
+    *) echo "unknown option $a" >&2; exit 2 ;;
+  esac
+done
 OUT=out/Maclator.app
 FONTS=.fonts
 GF=https://github.com/google/fonts/raw/main/ofl
@@ -57,9 +68,21 @@ cat > "$OUT/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
+if [ $BUNDLE = 1 ]; then
+  # maclator finds the GPU bridge in a gpu/ directory next to itself (gpu.rs).
+  (cd .. && ~/.cargo/bin/cargo build --release -p maclator && gpu/build.sh >/dev/null)
+  # In Contents/Resources/bin, sealed as resources by the app's signature:
+  # - not Contents/MacOS: on a case-insensitive volume maclator would overwrite Maclator;
+  # - not Contents/Helpers: codesign treats that as nested code and refuses an unsigned binary there, while
+  #   maclator must stay unsigned (an x86-64 binary may be; once signed, ad hoc or not, it is killed with
+  #   SIGKILL at exec). The GPU dylibs are already signed by gpu/build.sh.
+  mkdir -p "$OUT/Contents/Resources/bin/gpu"
+  cp ../target/release/maclator "$OUT/Contents/Resources/bin/maclator"
+  cp ../gpu/out/libmclbridge.dylib ../gpu/out/libmclmetal.dylib "$OUT/Contents/Resources/bin/gpu/"
+fi
 codesign -f -s - "$OUT" >/dev/null 2>&1
 echo "built $PWD/$OUT"
-if [ "${1:-}" = --install ]; then
+if [ $INSTALL = 1 ]; then
   DEST=/Applications
   [ -w "$DEST" ] || DEST=~/Applications   # not an admin account
   mkdir -p "$DEST"

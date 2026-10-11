@@ -19,10 +19,12 @@ struct Install {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
         let exe = Bundle.main.executableURL?.deletingLastPathComponent()
+        // A release build carries its own maclator in Contents/Resources/bin (app/build.sh --bundle);
+        // a development build uses the one scripts/install.sh put in ~/bin.
         let maclatorCandidates = [
             ProcessInfo.processInfo.environment["MACLATOR"].map { URL(fileURLWithPath: $0) },
+            Bundle.main.resourceURL?.appending(path: "bin/maclator"),
             home.appending(path: "bin/maclator"),
-            exe?.appending(path: "maclator"),
             URL(fileURLWithPath: "/usr/local/bin/maclator"),
         ].compactMap { $0 }
         let maclator = maclatorCandidates.first { fm.isExecutableFile(atPath: $0.path) }
