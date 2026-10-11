@@ -2,7 +2,8 @@
 """Maintain the compatibility list from Maclator's own run records.
 
   scripts/compat.py import [path]   merge the launcher's compat.json into docs/compatibility.json
-  scripts/compat.py markdown        regenerate docs/COMPATIBILITY.md from docs/compatibility.json
+  scripts/compat.py markdown        regenerate the table region of docs/COMPATIBILITY.md (between the
+                                    compat:start / compat:end markers) from docs/compatibility.json
 """
 import json
 import os
@@ -110,40 +111,47 @@ def cell(s):
     return str(s).replace("|", "\\|").replace("\n", " ")
 
 
+START = "<!-- compat:start -->"
+END = "<!-- compat:end -->"
+
+
 def cmd_markdown():
     data = load(LIST)
     out = [
-        "# Compatibility list",
+        "Generated from [compatibility.json](compatibility.json) by `scripts/compat.py markdown`; the launcher app "
+        "reads the same file. Times are to the first window on a first launch with an empty translation cache.",
         "",
-        "What was tried under Maclator, and how it went. Generated from [compatibility.json](compatibility.json) "
-        "by `scripts/compat.py markdown`; the launcher app reads the same file.",
+        "Recorded on: %s." % data["host"],
         "",
         "- **Works**: the app starts and opens its window; anything beyond that is in the notes.",
         "- **Partly works**: it starts, but something breaks or is missing (see the notes).",
         "- **Doesn't run**: it never reaches a usable window.",
         "- **Not tried**: no result recorded.",
-        "",
-        "Times are to the first window on a first launch with an empty translation cache; later launches are faster.",
-        "",
-        "Tested on: %s." % data["host"],
-        "",
-        "To add your own results, run apps from Maclator.app (it records each run on your Mac), then "
-        "`scripts/compat.py import && scripts/compat.py markdown`.",
     ]
     apps = sorted(data["apps"], key=lambda a: (a["name"].lower(), a["bundleID"]))
     for verdict, title, _ in SECTIONS:
         rows = [a for a in apps if a["verdict"] == verdict]
         if not rows:
             continue
-        out += ["", "## %s (%d)" % (title, len(rows)), "",
+        out += ["", "### %s (%d)" % (title, len(rows)), "",
                 "| App | Bundle ID | First window | Tested | Notes |", "|---|---|---|---|---|"]
         for a in rows:
             fw = a.get("firstWindow")
             fw = "%d s" % round(fw) if fw is not None else ""
             out.append("| %s | `%s` | %s | %s | %s |" % (
                 cell(a["name"]), a["bundleID"], fw, a.get("tested", ""), cell(a.get("note", ""))))
+    region = START + "\n" + "\n".join(out) + "\n" + END
+    try:
+        with open(MARKDOWN) as f:
+            page = f.read()
+    except OSError:
+        page = "# Compatibility list\n\n" + START + "\n" + END + "\n"
+    if START in page and END in page and page.index(START) < page.index(END):
+        page = page[:page.index(START)] + region + page[page.index(END) + len(END):]
+    else:
+        page = page.rstrip("\n") + "\n\n" + region + "\n"
     with open(MARKDOWN, "w") as f:
-        f.write("\n".join(out) + "\n")
+        f.write(page)
     print("wrote", os.path.relpath(MARKDOWN, ROOT))
 
 
