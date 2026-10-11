@@ -14,48 +14,85 @@ arm64-only. This project explores how far you can get anyway.
 > **Status: experimental research project.** Things that run today are listed below; many apps will not.
 > Expect rough edges. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for what is missing.
 
+## About this fork
+
+A fork of [linuxkid473/maclator](https://github.com/linuxkid473/maclator) with, on top:
+
+- emulator fixes that get Homebrew, Microsoft Office, Pages/Numbers/Keynote, Final Cut Pro, Chrome and the
+  arm64-only ChatGPT app running: `--arm64-children`, the guest's own entitlements, cooperative thread suspension,
+  fork-safe locks, `sysctl` by MIB, root-patched hosts, ARMv8 crypto features
+  ([DEVELOPMENT](docs/DEVELOPMENT.md#key-bugs-found--fixed-so-you-recognise-symptoms) lists them with symptoms);
+- **Homebrew** on Intel Macs (`scripts/brew`, [USAGE](docs/USAGE.md#homebrew));
+- **Maclator.app**, a launcher (`app/`): a library of arm64 apps (found on all volumes, or added by hand), launch
+  options, and a live view of everything running under Maclator with output, CPU and memory;
+- per-process logs of the guest's stdout/stderr in `~/Library/Logs/Maclator/<pid>.log`;
+- the compatibility list below.
+
 ## What runs
 
-"Works" means the app starts and opens its window; app features beyond that are noted where they were checked.
-Machine-readable list (also shown in the launcher app): [docs/compatibility.json](docs/compatibility.json).
+"Works" means the program starts and opens its window (or, for command-line tools, does its job); features beyond
+that are noted where they were checked. Times are to the first window on a **first launch** with an empty translation
+cache; later launches are faster. Machine-readable list, also shown in the launcher app:
+[docs/compatibility.json](docs/compatibility.json).
 
-**Intel Core i5-4440, macOS 26.7**
+Tested on two Intel Macs: **A** = Core i5-4440 + AMD Radeon RX 460, macOS 26.7; **B** = Core i5-10310U (MacBook Pro
+13" 2020), Intel UHD, macOS 26.6, OpenCore Legacy Patcher root patches.
 
-| Program | Kind | Status |
-|---|---|---|
-| `fastfetch`, `neatvi` (arm64 CLI tools) | C | works |
-| a small AppKit calculator (`tests/guest/calc`) | AppKit | works |
-| VS Code 1.139 arm64 | Electron | works; typing latency ~40 ms |
-| Chromium 157 arm64 snapshot | Chromium | works, including **GPU acceleration** (ANGLE/Metal → host AMD GPU, 60 fps canvas) |
-| balenaEtcher 2.1.7 arm64 | Electron | starts (device access untested) |
+### arm64-only programs (there is no Intel build)
 
-**Intel Core i5-10310U, macOS 26.6** (arm64 half of universal apps; first launch, empty translation cache; time to
-the first window in brackets)
+| Program | Kind | Mac | Result | Conditions |
+|---|---|---|---|---|
+| ChatGPT desktop 26.928 (`com.openai.codex`) | Chromium 154 | B | works (2 min) | `--no-sandbox` [C]; host icon service healthy [H] |
+| VS Code 1.139 (darwin-arm64) | Electron | A | works; typing latency ~40 ms | `--no-sandbox` [C]; `scripts/vscode-gpu` for GPU |
+| Chromium 157 snapshot | Chromium | A | works, **GPU accelerated** (ANGLE/Metal → RX 460, 60 fps canvas) | `--no-sandbox` [C]; `--gpu --gpu-only --type=gpu-process` ([GPU](docs/GPU.md)) |
+| balenaEtcher 2.1.7 | Electron | A | starts; device access untested | `--no-sandbox` [C] |
+| Homebrew 7.0.7 (Apple Silicon only since macOS 26) | bash + Ruby 4.0.7 | B | works: official installer, `brew install`, arm64 bottles | `--arm64-children`; see [Homebrew](docs/USAGE.md#homebrew) |
+| Homebrew bottles: `hello`, `fastfetch`, `yyjson` | C | B | work | through `~/bin/brew` and its shims |
+| `fastfetch`, `neatvi` | C | A | work | none |
+| AppKit calculator (`tests/guest/calc`) | AppKit | A | works | none |
 
-| Program | Kind | Status |
-|---|---|---|
-| Homebrew 7.0.7 (`/opt/homebrew`, see [USAGE](docs/USAGE.md#homebrew)) | bash + Ruby | works: installer, `brew install`, arm64 bottles (`hello`, `fastfetch`) |
-| Microsoft Word, Excel, PowerPoint, OneNote 16.113 | AppKit, sandboxed | works (15–26 s); documents not checked |
-| Pages, Numbers, Keynote 15.3 | Swift, sandboxed | works (15–20 s); iCloud not checked; busy CPU while idle |
-| Google Chrome 154 | Chromium | works (29 s), with `--no-sandbox` |
-| Pixelmator Pro 3.6 | Swift, sandboxed | works (relaunches itself at start) |
-| Windows App 11.4 | Swift, sandboxed | works (11 s); remote sessions not checked |
-| AppCleaner 3.6.8 | AppKit | works (40 s) |
-| foobar2000 2.25 | C++/AppKit | works (15 s) |
-| coconutBattery 4.4 | Swift | works (26 s) |
-| FluxMarkdown 1.34 | Swift | works (8 s) |
-| Mos 4.2 | Swift | works (12 s); scrolling not checked |
-| Hidden Bar 1.8 | Swift, sandboxed | works (8 s) |
-| HandBrake 1.11 | AppKit, sandboxed | works (36 s); encoding not checked |
-| Termius 10.1 | Electron | works (2.5 min) |
-| RDM 2.5, OneDrive | menu bar | start and keep running; menus not checked |
-| VLC 3.0.24 | AppKit | works (10 s); playback not checked |
-| Final Cut Pro 12.3 | Swift, sandboxed | works (87 s); editing not checked |
-| Ghostty 1.3.1 | Swift + Zig, Metal | opens a window; terminal drawing unconfirmed (`CAMetalLayer` is not bridged yet) |
-| ChatGPT (arm64 only, no Intel build) | Chromium | works (2 min), with `--no-sandbox` |
+### Universal apps (their arm64 half, run under Maclator)
 
-Not done: audio, most IOKit hardware, `CAMetalLayer`-based apps. Sandboxed apps start without their sandbox (the
-host does not apply the guest's entitlements); some may refuse to run that way.
+| Program | Kind | Mac | Result | Conditions |
+|---|---|---|---|---|
+| Microsoft Word, Excel, PowerPoint 16.113 | AppKit, sandboxed | B | work (15–26 s); documents not checked | [S] |
+| Microsoft OneNote 16.113 | AppKit + JavaScriptCore, sandboxed | B | works (19 s) | [S]; thread suspension [T] |
+| Pages, Numbers, Keynote 15.3 | Swift, sandboxed, App Store | B | work (15–20 s); iCloud not checked; busy CPU while idle | [S]; own entitlements [E] |
+| Final Cut Pro 12.3 | Swift, sandboxed, App Store | B | works (87 s); editing not checked | [S]; [H] |
+| Pixelmator Pro 3.6 | Swift, sandboxed, App Store | B | works; relaunches itself at start | [S] |
+| Windows App 11.4 | Swift, sandboxed, App Store | B | works (11 s); remote sessions not checked | [S] |
+| Google Chrome 154 | Chromium | B | works (29 s) | `--no-sandbox` [C] |
+| Termius 10.1 | Electron | B | works (2.5 min) | `--no-sandbox` [C] |
+| HandBrake 1.11 | AppKit, sandboxed | B | works (36 s); encoding not checked | [S] |
+| Hidden Bar 1.8 | Swift, sandboxed, App Store | B | works (8 s) | [S] |
+| AppCleaner 3.6.8 | AppKit | B | works (40 s) | none |
+| foobar2000 2.25 | C++/AppKit | B | works (15 s) | none |
+| VLC 3.0.24 | AppKit | B | works (10 s); playback not checked (no audio yet) | none |
+| coconutBattery 4.4 | Swift | B | works (26 s); readings not checked | none |
+| FluxMarkdown 1.34 | Swift | B | works (8 s) | none |
+| Mos 4.2 | Swift | B | works (12 s); scroll smoothing not checked | needs Accessibility permission for its feature |
+| RDM 2.5, OneDrive | menu bar | B | start and keep running; menus not checked | none |
+| Ghostty 1.3.1 | Swift + Zig, Metal | B | opens a window; whether the terminal draws is unconfirmed | `CAMetalLayer` is not bridged yet; CPU feature report [F] |
+
+**Conditions**
+
+- **[C] Chromium/Electron**: run with `--no-sandbox` (the Chromium sandbox cannot initialise under Maclator). The
+  launcher app adds it for any Chromium-based app; from a terminal, pass it after the program path.
+- **[S] Sandboxed apps** start *without* their sandbox: the host only knows `maclator`'s signature. They run, but
+  keep their data in your home folder rather than in a container.
+- **[E] Own entitlements**: frameworks such as CloudKit check the process's entitlements and trap without them;
+  Maclator answers the guest's own `csops` queries from the app's signature (`codesign.rs`).
+- **[T] Thread suspension**: JavaScriptCore's garbage collector (and anything with a web view) suspends threads and
+  reads their registers; Maclator emulates this cooperatively (`suspend.rs`).
+- **[F] CPU features**: guests are told about AES/PMULL/SHA1/SHA256, which Maclator implements and software built
+  for Apple Silicon may require.
+- **[H] Host health**: apps wait for the icon service (`iconservicesagent`) at start. On Mac B, OpenCore Legacy
+  Patcher left the system volume with a broken seal, and *native* x86 processes using VideoToolbox (icon service,
+  Safari, `mediaanalysisd`) crash with `FS pagein error: 94 Bad message`; while that happens, apps under Maclator
+  hang before their first window. A restart (and if needed re-applying the root patches) clears it.
+
+Not done: audio, most IOKit hardware, `CAMetalLayer`-based apps (the GPU bridge covers Metal used by Chromium/ANGLE,
+not apps that present through a Metal layer directly), FairPlay-encrypted iOS apps.
 
 ![chrome://gpu in the arm64 Chromium 157 snapshot running under Maclator on an Intel Mac Pro: canvas, compositing, rasterization, WebGL and WebGPU hardware accelerated on an AMD Radeon RX 460 via ANGLE/Metal](docs/img/chromium-gpu.png)
 
@@ -67,7 +104,7 @@ You need an Intel Mac on macOS 26 (Tahoe) with Xcode Command Line Tools and a Ru
 free disk, and an internet connection for the one-time download of the arm64 dyld shared cache.
 
 ```bash
-git clone https://github.com/linuxkid473/maclator && cd maclator
+git clone https://github.com/pointlessduffin-21/maclator-fork maclator && cd maclator
 scripts/install.sh            # builds maclator + the GPU bridge, installs to ~/bin
 scripts/fetch-sysroot.sh      # downloads the arm64e dyld shared cache (≈5.5 GB) into ~/maclator-sysroot
 maclator ./some-arm64-binary  # that's it; the sysroot is found automatically
