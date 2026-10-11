@@ -46,6 +46,10 @@ pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::SeqCst);
 }
 
+pub fn enabled() -> bool {
+    ENABLED.load(Ordering::SeqCst)
+}
+
 fn cache_dir() -> std::path::PathBuf {
     if let Ok(d) = std::env::var("MACLATOR_CACHE") {
         return d.into();

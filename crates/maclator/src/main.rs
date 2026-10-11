@@ -30,6 +30,7 @@ fn usage() -> ! {
     eprintln!("options:");
     eprintln!("  --interp        interpreter only (no JIT/AOT)");
     eprintln!("  --no-aot        JIT only: don't load or build AOT translations");
+    eprintln!("  --cache-dir DIR AOT cache directory (default ~/Library/Caches/Maclator/aot, or $MACLATOR_CACHE)");
     eprintln!("  --dyld PATH     arm64 dyld to use (default /usr/lib/dyld)");
     eprintln!("  --sysroot DIR   directory with the arm64 dyld shared cache files");
     eprintln!("  --trace         trace system calls");
@@ -93,6 +94,15 @@ fn main() {
                 aot::set_enabled(false);
                 args.remove(0);
             }
+            "--cache-dir" => {
+                // AOT cache directory (same as MACLATOR_CACHE); forwarded to arm64 children, whose
+                // environment never carries MACLATOR_* variables.
+                args.remove(0);
+                if args.is_empty() {
+                    usage();
+                }
+                std::env::set_var("MACLATOR_CACHE", args.remove(0));
+            }
             "--sysroot" => {
                 args.remove(0);
                 if args.is_empty() {
@@ -154,6 +164,13 @@ fn main() {
         }
         if spawn::ARM64_CHILDREN.load(Ordering::Relaxed) {
             fwd.push("--arm64-children".into());
+        }
+        if !aot::enabled() && jit::JIT_ENABLED.load(Ordering::Relaxed) {
+            fwd.push("--no-aot".into());
+        }
+        if let Ok(d) = std::env::var("MACLATOR_CACHE") {
+            fwd.push("--cache-dir".into());
+            fwd.push(d);
         }
         if std::env::var_os("MACLATOR_GPU").is_some() {
             fwd.push("--gpu".into());
