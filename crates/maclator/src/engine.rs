@@ -75,6 +75,21 @@ extern "C" fn dump_current(_: i32) {
             fb,
         );
         libc::write(2, buf.as_ptr() as *const libc::c_void, n.max(0) as usize);
+        let ph = crate::jit::phase_snapshot();
+        let n = libc::snprintf(
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            b"[phases] pid %d aot-load=%llu ms (%llu chunks) slide=%llu ms profile-save=%llu ms interpreter=%llu ms cpu=%llu ms max-rss=%llu MB\n\0".as_ptr() as *const libc::c_char,
+            libc::getpid(),
+            ph.aot_load_ms,
+            ph.aot_chunks,
+            ph.slide_ms,
+            ph.save_ms,
+            ph.interp_ms,
+            ph.cpu_ms,
+            ph.max_rss_mb,
+        );
+        libc::write(2, buf.as_ptr() as *const libc::c_void, n.max(0) as usize);
     }
 }
 

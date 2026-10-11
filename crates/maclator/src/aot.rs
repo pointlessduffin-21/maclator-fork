@@ -343,6 +343,8 @@ unsafe impl Send for LazyFile {}
 static LAZY: Mutex<Vec<LazyFile>> = Mutex::new(Vec::new());
 /// Time spent opening AOT files and copying chunks (ns), and chunks copied.
 pub static STATS_LOAD_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Time spent in `save_profile` (ns).
+pub static STATS_SAVE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static STATS_CHUNKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl LazyFile {
@@ -595,6 +597,12 @@ pub fn save_profile(mode: SaveMode) {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
+    let t0 = std::time::Instant::now();
+    save_profile_inner(mode);
+    STATS_SAVE_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+}
+
+fn save_profile_inner(mode: SaveMode) {
     flush_pending();
     let save = SAVE.lock().unwrap();
     let imgs = IMAGES.lock().unwrap().clone();

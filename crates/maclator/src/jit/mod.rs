@@ -196,6 +196,8 @@ static STATS_FALLBACK: AtomicU64 = AtomicU64::new(0);
 static STATS_TRANSLATE_NS: AtomicU64 = AtomicU64::new(0);
 static STATS_INTERP_BLOCKS: AtomicU64 = AtomicU64::new(0);
 static STATS_JIT_ENTRIES: AtomicU64 = AtomicU64::new(0);
+static STATS_INTERP_NS: AtomicU64 = AtomicU64::new(0);
+static STATS_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("MACLATOR_STATS").is_some());
 
 /// Executions of a block in the interpreter before it is JIT-compiled.
 fn hot_threshold() -> u32 {
@@ -518,9 +520,42 @@ pub fn stats_snapshot() -> (u64, u64, u64, u64, u64) {
     )
 }
 
+/// Phase counters for `MACLATOR_STATS` and the SIGUSR2 line, in ms (process CPU and peak RSS from
+/// `getrusage`): AOT file open + chunk loads, shared-cache map/slide, profile saves, interpreter
+/// (only measured when MACLATOR_STATS is set; includes system calls made from interpreted blocks).
+pub struct Phases {
+    pub aot_load_ms: u64,
+    pub slide_ms: u64,
+    pub save_ms: u64,
+    pub interp_ms: u64,
+    pub cpu_ms: u64,
+    pub max_rss_mb: u64,
+    pub aot_chunks: u64,
+}
+
+pub fn phase_snapshot() -> Phases {
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+    let tv = |t: libc::timeval| t.tv_sec as u64 * 1000 + t.tv_usec as u64 / 1000;
+    Phases {
+        aot_load_ms: crate::aot::STATS_LOAD_NS.load(Ordering::Relaxed) / 1_000_000,
+        slide_ms: crate::cache::STATS_SLIDE_NS.load(Ordering::Relaxed) / 1_000_000,
+        save_ms: crate::aot::STATS_SAVE_NS.load(Ordering::Relaxed) / 1_000_000,
+        interp_ms: STATS_INTERP_NS.load(Ordering::Relaxed) / 1_000_000,
+        cpu_ms: tv(ru.ru_utime) + tv(ru.ru_stime),
+        max_rss_mb: ru.ru_maxrss as u64 / (1024 * 1024),
+        aot_chunks: crate::aot::STATS_CHUNKS.load(Ordering::Relaxed),
+    }
+}
+
 pub fn flush_profile(mode: crate::aot::SaveMode) {
     crate::aot::save_profile(mode);
     if std::env::var_os("MACLATOR_STATS").is_some() {
+        let p = phase_snapshot();
+        eprintln!(
+            "[maclator] phases: aot-load {} ms ({} chunks), slide {} ms, profile-save {} ms, interpreter {} ms, cpu {} ms, max-rss {} MB",
+            p.aot_load_ms, p.aot_chunks, p.slide_ms, p.save_ms, p.interp_ms, p.cpu_ms, p.max_rss_mb
+        );
         eprintln!(
             "[maclator] jit: {} blocks, {} insns translated ({} via interpreter helper), {:.1} ms translating; {} block entries; {} blocks interpreted (cold)",
             STATS_BLOCKS.load(Ordering::Relaxed),
@@ -736,7 +771,12 @@ pub fn run(cpu: &mut Cpu) {
                     }
                     if n < hot_threshold() {
                         STATS_INTERP_BLOCKS.fetch_add(1, Ordering::Relaxed);
-                        if !interp_block(cpu) {
+                        let t0 = if *STATS_ON { Some(std::time::Instant::now()) } else { None };
+                        let keep_going = interp_block(cpu);
+                        if let Some(t0) = t0 {
+                            STATS_INTERP_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        }
+                        if !keep_going {
                             return;
                         }
                         continue;

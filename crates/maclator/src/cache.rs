@@ -15,6 +15,10 @@ pub const CACHE_BASE: u64 = 0x6_0000_0000;
 
 pub static CACHE: Mutex<Option<MappedCache>> = Mutex::new(None);
 
+/// Time spent in `map_and_slide_2` (mapping, sliding or mapping the pre-slid copies, and writing
+/// them the first time), in ns. Part of the phase counters (`jit::phase_snapshot`).
+pub static STATS_SLIDE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Debug, Clone)]
 pub struct MappedCache {
     pub base: u64,
@@ -186,6 +190,7 @@ pub fn map_and_slide_2(files_count: u32, files: u64, mappings_count: u32, mappin
     }
     let end = ranges.iter().map(|(a, s)| a + s).max().unwrap_or(CACHE_BASE);
     *guard = Some(MappedCache { base: CACHE_BASE, slide, ranges });
+    STATS_SLIDE_NS.store(t_map.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     drop(guard);
     let mut uuid = [0u8; 16];
     unsafe { std::ptr::copy_nonoverlapping((CACHE_BASE + 88) as *const u8, uuid.as_mut_ptr(), 16) };
