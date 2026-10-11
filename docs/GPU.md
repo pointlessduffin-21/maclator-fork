@@ -18,7 +18,7 @@ starved the renderers; flags: `--use-angle=metal --use-gl=angle --enable-gpu --i
 | bridge v2 (this section) | **16.7 ms (vsync-capped 60 fps)** | still 60 fps with 400 arcs; guest time spent in the bridge fell from ~4300 ms to ~650 ms per 5 s |
 
 ### Design (all in `gpu/` + `crates/maclator/src/gpu.rs`)
-- `gpu/mclmetal.m` → **guest** arm64 `libmclmetal.dylib`, injected with `DYLD_INSERT_LIBRARIES` (maclator does this
+- `gpu/mclmetal.m` → **guest** `libmclmetal.dylib` (universal arm64 + arm64e, since arm64e guests reject an arm64-only dylib), injected with `DYLD_INSERT_LIBRARIES` (maclator does this
   for `--gpu`, then the shim `unsetenv`s it). It interposes `MTLCreateSystemDefaultDevice/MTLCopyAllDevices` and
   returns `MCLProxy` (NSProxy) objects for host Metal objects.
 - `gpu/mclbridge.m` → **host** x86-64 `libmclbridge.dylib`, dlopen'ed by maclator (`gpu.rs`). Handle table of real

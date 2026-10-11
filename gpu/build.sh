@@ -1,7 +1,7 @@
 #!/bin/bash
 # Builds the Maclator Metal bridge:
 #   libmclbridge.dylib   x86-64 host side (loaded by maclator on first GPU call)
-#   libmclmetal.dylib    arm64 guest shim (injected into the guest with DYLD_INSERT_LIBRARIES)
+#   libmclmetal.dylib    arm64 + arm64e guest shim (injected with DYLD_INSERT_LIBRARIES; arm64e guests refuse an arm64-only dylib)
 #   libmclloop.dylib     arm64 shim + bridge in one dylib for native testing on an Apple Silicon Mac
 #   metaltri (arm64)     guest smoke test
 set -e
@@ -10,7 +10,7 @@ OUT=${OUT:-out}
 mkdir -p $OUT
 clang -arch x86_64 -dynamiclib -fobjc-arc -O2 -framework Foundation -framework Metal -framework IOSurface \
   -install_name @rpath/libmclbridge.dylib mclbridge.m -o $OUT/libmclbridge.dylib
-clang -arch arm64 -dynamiclib -fno-objc-arc -O2 -framework Foundation -framework Metal -framework IOSurface \
+clang -arch arm64 -arch arm64e -dynamiclib -fno-objc-arc -O2 -framework Foundation -framework Metal -framework IOSurface \
   -install_name @rpath/libmclmetal.dylib mclmetal.m -o $OUT/libmclmetal.dylib
 codesign -f -s - $OUT/libmclbridge.dylib $OUT/libmclmetal.dylib
 if [ "$(uname -m)" = arm64 ]; then
