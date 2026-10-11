@@ -16,7 +16,7 @@
 //!
 //! File layout (`MCLAOT05`): 64-byte header (magic, translator version, flags, block count,
 //! code length, chunk count), the block index (`pc`, code offset; sorted by pc), the chunk table
-//! (first index entry, code offset), padding, then the code. Code is laid out in chunks of 4,096
+//! (first index entry, code offset), padding, then the code. Code is laid out in chunks of 1,024
 //! blocks; jumps never cross a chunk, so a chunk is the unit that is copied into the JIT code
 //! cache, and only when one of its blocks is first needed (`lazy_lookup`). Loading a file is
 //! just mapping it read-only.
@@ -318,7 +318,7 @@ pub fn ensure_loaded() {
 const HDR: usize = 64;
 const CODE_ALIGN: usize = 0x4000;
 /// Blocks per chunk (one assembler run, and the unit of lazy loading).
-const CHUNK_BLOCKS: usize = 4096;
+const CHUNK_BLOCKS: usize = 1024;
 
 fn code_offset(n: usize, nchunks: usize) -> usize {
     (HDR + n * 16 + nchunks * 16 + CODE_ALIGN - 1) & !(CODE_ALIGN - 1)
@@ -412,40 +412,51 @@ fn open_lazy(img: &Image) -> Option<LazyFile> {
 /// cache and registering the chunk's blocks on first use.
 pub fn lazy_lookup(pc: u64) -> Option<u64> {
     let t0 = std::time::Instant::now();
-    let mut g = LAZY.lock().unwrap();
-    let f = g.iter_mut().find(|f| pc >= f.start && pc < f.end)?;
-    let (mut lo, mut hi) = (0usize, f.n);
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        if f.idx(mid).0 < pc {
-            lo = mid + 1;
-        } else {
-            hi = mid;
+    // Copying a chunk allocates code-cache space, which `translate_inner` assumes nobody else does
+    // between reading the cursor and allocating: take the translator lock first (order:
+    // TRANSLATE, then LAZY, as in `jit::lock_for_fork`), but only when a chunk must be loaded.
+    let mut tlock = None;
+    loop {
+        let mut g = LAZY.lock().unwrap();
+        let f = g.iter_mut().find(|f| pc >= f.start && pc < f.end)?;
+        let (mut lo, mut hi) = (0usize, f.n);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if f.idx(mid).0 < pc {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
         }
-    }
-    if lo >= f.n {
-        return None;
-    }
-    let (p, off) = f.idx(lo);
-    if p != pc {
-        return None;
-    }
-    // Last chunk whose first entry is at or before `lo`.
-    let (mut clo, mut chi) = (0usize, f.nchunks);
-    while clo < chi {
-        let mid = (clo + chi) / 2;
-        if f.chunk(mid).0 as usize <= lo {
-            clo = mid + 1;
-        } else {
-            chi = mid;
+        if lo >= f.n {
+            return None;
         }
+        let (p, off) = f.idx(lo);
+        if p != pc {
+            return None;
+        }
+        // Last chunk whose first entry is at or before `lo`.
+        let (mut clo, mut chi) = (0usize, f.nchunks);
+        while clo < chi {
+            let mid = (clo + chi) / 2;
+            if f.chunk(mid).0 as usize <= lo {
+                clo = mid + 1;
+            } else {
+                chi = mid;
+            }
+        }
+        let k = clo.checked_sub(1)?;
+        if f.loaded[k] == 0 {
+            if tlock.is_none() {
+                drop(g);
+                tlock = Some(crate::jit::translate_lock());
+                continue;
+            }
+            f.load_chunk(k);
+            STATS_LOAD_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        return Some(f.loaded[k] + (off - f.chunk(k).1));
     }
-    let k = clo.checked_sub(1)?;
-    if f.loaded[k] == 0 {
-        f.load_chunk(k);
-        STATS_LOAD_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    }
-    Some(f.loaded[k] + (off - f.chunk(k).1))
 }
 
 fn read_profile(path: &std::path::Path) -> (BTreeSet<u64>, u64) {

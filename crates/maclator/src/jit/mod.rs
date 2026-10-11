@@ -240,6 +240,11 @@ impl CodeCache {
     }
 }
 
+/// The translator lock, for code that allocates in the code cache outside `translate_inner`.
+pub fn translate_lock() -> std::sync::MutexGuard<'static, ()> {
+    TRANSLATE.lock().unwrap()
+}
+
 pub fn lookup(pc: u64) -> Option<u64> {
     BLOCKS.read().as_ref().and_then(|m| m.get(&pc).copied())
 }

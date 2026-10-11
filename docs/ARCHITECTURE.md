@@ -19,7 +19,7 @@ Workspace: `crates/core` (CPU state, interpreter, softfloat, mem), `crates/macla
 - `maclator/workq.rs` — libdispatch workqueue/workloop/kevent emulation (worker threads,
   single event-manager rule, QoS restore, wl monitors).
 - `maclator/spawn.rs` — `posix_spawn/execve`: arm64-only Mach-Os are re-launched through
-  maclator with forwarded flags (`--dyld --sysroot --interp --trace --dump-on-fault`).
+  maclator with forwarded flags (`--dyld --sysroot --interp --no-aot --cache-dir --arm64-children --trace --dump-on-fault`).
 - `maclator/iokit.rs` — `mach_msg2` shim: fake Apple-Silicon-only IOKit services
   (`AppleDiagnosticDataAccessReadOnly`), and thread suspend/resume/get_state neutralisation.
 - `maclator/jit/{mod,emit,selftest}.rs` — x86-64 JIT (iced-x86), tiering (interpret cold
@@ -29,18 +29,57 @@ Workspace: `crates/core` (CPU state, interpreter, softfloat, mem), `crates/macla
 - `maclator/engine.rs` — run loop, fault/USR1/USR2 dump handlers. `signals.rs`, `threads.rs`.
 
 ### AOT cache
-Images registered: main exe (fixed base), dyld, shared cache, and **every dyld-loaded arm64
-library** (registered when dyld `mmap`s its executable `__TEXT` at file offset 0; key =
-`lib-<uuid>-<base>`). Bases are deterministic because `mach_vm_allocate(ANYWHERE)` is served from
-a 64 GB arena (`syscalls.rs`, candidate bases tried in order). Every block that executes
-(cold-interpreted or JIT-translated) is recorded; on exit `save_profile()` forks a builder that
-writes `<key>.aot` (position-independent x86 + index). Loaded by **copying into the JIT code
-cache** — do NOT mmap the files PROT_EXEC (macOS Gatekeeper pops "Apple could not verify…"
-dialogs for every file). Bump `TRANSLATOR_VERSION` (currently **15**) whenever codegen changes. Every
-version bump invalidates the *whole* cache (files are shared between binaries: two builds with different versions on
-the same machine keep overwriting each other's cache, so A/B-test translators with `--no-aot`).
-Processes that are killed (`kill -9`) do not save profiles; quit gracefully (e.g. DevTools
-`Browser.close`, see `wsonly.py`) to build the cache. Rebuilds can take several minutes.
+Cache directory: `~/Library/Caches/Maclator/aot`, or `--cache-dir DIR` / `$MACLATOR_CACHE` (both are forwarded to
+re-launched arm64 children, as is `--no-aot`; the guest environment itself never carries `MACLATOR_*`).
+
+**What is cached.** Images registered: main exe (fixed base), dyld, shared cache, and **every dyld-loaded arm64
+library**: any readable, executable, file-backed `mmap` whose first bytes are an arm64 Mach-O header (so the arm64
+slice of a *fat* library, e.g. Electron Framework at ~212 MB into the file, is registered too; key =
+`lib-<uuid>-<base>`). Bases are deterministic because `mach_vm_allocate(ANYWHERE)` is served from a 64 GB arena
+(`syscalls.rs`, candidate bases tried in order). Every block that executes (cold-interpreted or JIT-translated)
+is recorded per image.
+
+**Profiles and builds.** `<key>.profile` is an append-only list of guest block addresses (8 bytes each). A process
+appends only what it has recorded since its previous save and what is not already on disk: at `fork` and `execve`
+(no build), at exit (`SaveMode::Exit`, which also forks a builder) and every 30 s from a timer thread
+(`MACLATOR_AOT_SAVE_SECS`), so a `kill -9` or an early-forking Electron main process still contributes. O_APPEND
+appends from concurrent processes cannot lose each other's blocks. `<key>.built` records the translator version
+and the profile length the `.aot` was built from; an image is "dirty" when they differ. At most one builder works
+on an image at a time (`flock` on `<key>.lock`, non-blocking; a finishing builder re-checks the profile, so a late
+append is not lost). The builder is a fork of the guest taken while holding the same locks as a guest `fork`
+(`jit::lock_for_fork`, which now includes the profile-save mutex and the lazy-load mutex), and retitles itself
+"maclator: building translation cache". The timer thread takes no JIT lock.
+
+**File format (`MCLAOT05`).** 64-byte header, block index (`pc`, code offset; sorted by pc), chunk table, code.
+Code is built in chunks of 1,024 blocks: jumps inside a chunk are direct, every other exit is a stub that stores the
+target pc, then probes the per-thread indirect-branch table inline (`StubKind::Plain` in `Unit::finish`) and only on
+a miss returns to the dispatcher. AOT code never patches itself (no chaining slots), so it stays position
+independent.
+
+**Loading is lazy.** Registering an image only `mmap`s its `.aot` read-only (microseconds). The first time a thread
+misses on a block (`jit::run`, or the chain path), `aot::lazy_lookup` binary-searches the mapped index and, on a hit,
+copies that block's whole chunk into the JIT code cache (under the translator lock, because `translate_inner` assumes
+nobody else allocates code between reading the cursor and allocating) and registers the chunk's blocks. Load cost is therefore
+proportional to what the process runs, not to the size of the file (the shared-cache file is 70+ MB). Chunks are
+copied, never mapped executable: do NOT mmap the files PROT_EXEC (macOS Gatekeeper pops "Apple could not
+verify…" dialogs for every file).
+
+**Pre-slid shared cache.** The arm64e shared cache's writable regions need sliding to our fixed `CACHE_BASE`
+(`cache.rs`). The first process does it and writes each slid region to `<cache dir>/slid-<cache uuid>-<slide>-<n>.bin`
+(~500 MB in total, written before the guest can touch the regions, temp file + rename); every later process maps
+those files `MAP_PRIVATE` and skips the slide: about 0.7-0.9 s and ~340 MB less RSS per process
+(`MACLATOR_NO_SLID=1` disables it). Files for old cache versions are not removed automatically.
+
+**Versions.** Bump `TRANSLATOR_VERSION` (currently **16**) whenever codegen changes. A version bump invalidates the
+*whole* cache (files are shared between binaries: two builds with different versions on the same machine keep
+overwriting each other's cache, so A/B-test translators with `--no-aot` or a separate `--cache-dir`); stale files are
+detected through `<key>.built` and rebuilt at the next exit. `MACLATOR_NO_AOT_BUILD` stops builders,
+`MACLATOR_AOT_SYNC` builds in the exiting process (tests), `MACLATOR_NO_AOT_SAVE` disables the timer.
+Rebuilds can take minutes; a process that is killed still has its last periodic snapshot in the profile.
+
+**Counters.** `MACLATOR_STATS=1` prints, at exit, fork and exec, a `phases:` line (AOT load ms and chunks,
+slide ms, profile-save ms, interpreter ms, process CPU ms, max RSS); SIGUSR2 prints the same as `[phases]` next to
+`[stats]`.
 
 ### Emulation notes / important decisions
 - **Page size 16 KiB**: `mmap` returns 16K-aligned, 16K-rounded regions (`mmap_16k`), sysctl
