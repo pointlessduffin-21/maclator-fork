@@ -4,3 +4,4 @@
 !/tests/guest/*.c
 gpu/out/
 .claude/
+.DS_Store
