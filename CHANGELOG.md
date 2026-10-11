@@ -3,6 +3,12 @@
 Versions follow `MAJOR.MINOR.PATCH`, with `-beta.N` for pre-releases. The current version is in [VERSION](VERSION):
 `maclator --version` prints it, and Maclator.app shows it in its sidebar and on this page (Changelog).
 
+## [Unreleased]
+
+### Changed
+- Hello.app greets with the words the ARM1 is said to have printed, "Hello World, I am ARM.", or "Hello World,
+  I am Intel." when its x86-64 code runs. Its icon says CPU instead of ARM, as the app runs as either.
+
 ## [0.1.0-beta.2] - 2026-10-11
 
 Phase 0 of the [plan for speed](docs/AOT-STUDY.md): the translation cache now does what it was meant to.

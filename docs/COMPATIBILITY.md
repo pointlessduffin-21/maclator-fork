@@ -33,11 +33,11 @@ Tested on two Intel machines:
 
 ## Screenshots
 
-![Hello.app, an example arm64 and x86-64 app, running its arm64 slice under Maclator on an Intel Mac: the headline reads Hello, I am ARM, the status line says arm64 code on an Intel CPU, translated by Maclator, and the tiles show architecture arm64, a 4 KB page size, 8 CPUs and 16 GB](img/hello-arm.png)
+![Hello.app, an example arm64 and x86-64 app, running its arm64 slice under Maclator on an Intel Mac: the headline reads Hello World, I am ARM, the status line says arm64 code on an Intel CPU, translated by Maclator, and the tiles show architecture arm64, a 4 KB page size, 8 CPUs and 16 GB](img/hello-arm.png)
 
 *Hello.app (in `examples/hello-arm`) under Maclator on an Intel Mac: the arm64 slice runs and reports what it sees.*
 
-![The same Hello.app run natively on the same Intel Mac: the headline reads Hello, I am Intel, the status line says x86-64 code running natively on an Intel CPU, and the architecture tile shows x86_64](img/hello-intel.png)
+![The same Hello.app run natively on the same Intel Mac: the headline reads Hello World, I am Intel, the status line says x86-64 code running natively on an Intel CPU, and the architecture tile shows x86_64](img/hello-intel.png)
 
 *The same app run directly, as x86-64 code, on the same Mac.*
 

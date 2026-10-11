@@ -1,4 +1,4 @@
-// Draws the Hello.app icon: a chip outline with pins on a paper tile, "ARM" in Instrument Serif,
+// Draws the Hello.app icon: a chip outline with pins on a paper tile, "CPU" in Instrument Serif,
 // one vermilion pin-1 dot. Usage: swift icon.swift out.png [size] [InstrumentSerif-Regular.ttf]
 import AppKit
 
@@ -42,7 +42,7 @@ g.setFillColor(accent)
 g.fillEllipse(in: CGRect(x: die.minX + 34 * s, y: die.maxY - 34 * s - 28 * s, width: 28 * s, height: 28 * s))
 
 let font = NSFont(name: "InstrumentSerif-Regular", size: 190 * s) ?? NSFont.systemFont(ofSize: 150 * s)
-let str = NSAttributedString(string: "ARM", attributes: [.font: font, .foregroundColor: NSColor(cgColor: ink)!, .kern: -3 * s])
+let str = NSAttributedString(string: "CPU", attributes: [.font: font, .foregroundColor: NSColor(cgColor: ink)!, .kern: -3 * s])
 let sz = str.size()
 str.draw(at: CGPoint(x: die.midX - sz.width / 2, y: die.midY - sz.height / 2 - 4 * s))
 try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))

@@ -57,7 +57,7 @@ let isARMCode: Bool = {
 }()
 let greetingName = isARMCode ? "ARM" : "Intel"
 let historyLine = isARMCode
-    ? "The first ARM processor, Acorn\u{2019}s ARM1, is said to have printed \u{201C}Hello World, I am ARM\u{201D} when it first ran on 26 April 1985."
+    ? "Acorn\u{2019}s ARM1, the first ARM processor, is said to have printed these words when it first ran on 26 April 1985."
     : "The Intel 8086, introduced in 1978, was the first processor to use the x86 instruction set that this code is written in."
 
 struct Snapshot {

@@ -710,7 +710,7 @@ struct ArmTestPane: View {
     var body: some View {
         Pane(title: "Test it") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Hello.app is a small universal app carried inside Maclator. Run here, its arm64 code goes through Maclator: if it greets you with “Hello, I am ARM.”, arm64 apps run on this Mac. (Opened normally on an Intel Mac it says “Hello, I am Intel.”) It also lists what it sees: architecture, CPU, OS and memory.")
+                Text("Hello.app is a small universal app carried inside Maclator. Run here, its arm64 code goes through Maclator: if it greets you with “Hello World, I am ARM.”, arm64 apps run on this Mac. (Opened normally on an Intel Mac it says “Hello World, I am Intel.”) It also lists what it sees: architecture, CPU, OS and memory.")
                     .font(Paper.sans(13.5)).foregroundStyle(Paper.ink2).fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 12) {
                     if let app = hello {

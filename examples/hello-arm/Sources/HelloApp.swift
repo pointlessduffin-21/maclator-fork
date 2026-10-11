@@ -19,7 +19,7 @@ final class Model: ObservableObject {
 
     init() {
         snap = gather()
-        append("Hello, I am \(greetingName).")
+        append("Hello World, I am \(greetingName).")
         for r in snap.system {
             append((r.sysctl.map { "sysctl \($0) = " } ?? "\(r.key) = ") + r.value)
         }
@@ -54,7 +54,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 10) {
                     Eyebrow("Hello.app")
-                    Title(before: "Hello, I am ", em: greetingName, after: ".", size: 56)
+                    Title(before: "Hello World, I am ", em: greetingName, after: ".", size: 56)
                     Text(historyLine)
                         .font(Paper.sans(14.5)).foregroundStyle(Paper.ink2)
                         .frame(maxWidth: 560, alignment: .leading).fixedSize(horizontal: false, vertical: true)
