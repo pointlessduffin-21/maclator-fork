@@ -37,10 +37,20 @@ struct Image {
 }
 
 static IMAGES: Mutex<Vec<Image>> = Mutex::new(Vec::new());
-/// Blocks translated by the JIT this run (per image index).
-static SEEN: Mutex<Vec<HashSet<u64>>> = Mutex::new(Vec::new());
+/// Blocks translated or cold-interpreted by this process (per image index).
+#[derive(Default, Clone)]
+struct SeenSet {
+    set: HashSet<u64>,
+    /// Blocks recorded since the last profile save, in order of discovery.
+    fresh: Vec<u64>,
+}
+static SEEN: Mutex<Vec<SeenSet>> = Mutex::new(Vec::new());
 static ENABLED: AtomicBool = AtomicBool::new(true);
-static SAVED: AtomicBool = AtomicBool::new(false);
+/// Serialises profile saves (timer thread, fork/exec/exit paths). Taken first by `lock_for_fork`,
+/// so a save never runs while the process forks, and never held while taking any JIT lock.
+static SAVE: Mutex<()> = Mutex::new(());
+/// Pid the periodic-save timer thread belongs to (a forked child starts its own).
+static TIMER_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::SeqCst);
@@ -168,7 +178,9 @@ fn add_image(img: Image) {
         return;
     }
     v.push(img);
-    SEEN.lock().unwrap().push(HashSet::new());
+    SEEN.lock().unwrap().push(SeenSet::default());
+    drop(v);
+    start_timer();
 }
 
 thread_local! {
@@ -209,16 +221,55 @@ pub fn note_translated(pc: u64) {
     if let Some(batch) = flush {
         let mut seen = SEEN.lock().unwrap();
         for (i, pc) in batch {
-            seen[i].insert(pc);
+            note_seen(&mut seen[i], pc);
         }
     }
 }
 
-/// The AOT recorder's locks, held across `fork` (see `jit::lock_for_fork`).
-pub struct ForkLocks(#[allow(dead_code)] std::sync::MutexGuard<'static, Vec<Image>>, #[allow(dead_code)] std::sync::MutexGuard<'static, Vec<HashSet<u64>>>);
+fn note_seen(s: &mut SeenSet, pc: u64) {
+    if s.set.insert(pc) {
+        s.fresh.push(pc);
+    }
+}
 
+/// The AOT recorder's locks, held across `fork` (see `jit::lock_for_fork`).
+pub struct ForkLocks(
+    #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
+    #[allow(dead_code)] std::sync::MutexGuard<'static, Vec<Image>>,
+    #[allow(dead_code)] std::sync::MutexGuard<'static, Vec<SeenSet>>,
+);
+
+/// Lock order: SAVE, IMAGES, SEEN (the save path takes them in the same order and holds no
+/// JIT lock while it does).
 pub fn lock_for_fork() -> ForkLocks {
-    ForkLocks(IMAGES.lock().unwrap(), SEEN.lock().unwrap())
+    let save = SAVE.lock().unwrap();
+    ForkLocks(save, IMAGES.lock().unwrap(), SEEN.lock().unwrap())
+}
+
+/// Called in a forked guest child: it is a new process and needs its own periodic-save timer.
+pub fn after_fork_child() {
+    start_timer();
+}
+
+/// Periodic profile snapshots (no build), so a process that is killed, or that forks early and
+/// runs for hours (Electron's main process), still contributes what it has translated.
+fn start_timer() {
+    if !ENABLED.load(Ordering::Relaxed) || std::env::var_os("MACLATOR_NO_AOT_SAVE").is_some() {
+        return;
+    }
+    let pid = unsafe { libc::getpid() } as u32;
+    if TIMER_PID.swap(pid, Ordering::SeqCst) == pid {
+        return;
+    }
+    // 30 s unless MACLATOR_AOT_SAVE_SECS says otherwise (for tests).
+    let every = std::time::Duration::from_secs(std::env::var("MACLATOR_AOT_SAVE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30).max(1));
+    let _ = std::thread::Builder::new().name("maclator-aot-save".into()).spawn(move || loop {
+        std::thread::sleep(every);
+        if unsafe { libc::getpid() } as u32 != pid {
+            return;
+        }
+        save_profile(SaveMode::Snapshot);
+    });
 }
 
 /// Publish this thread's not-yet-flushed blocks (called before saving the profile).
@@ -226,7 +277,7 @@ pub fn flush_pending() {
     let batch = PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()));
     let mut seen = SEEN.lock().unwrap();
     for (i, pc) in batch {
-        seen[i].insert(pc);
+        note_seen(&mut seen[i], pc);
     }
 }
 
@@ -299,18 +350,20 @@ fn load_file(path: &std::path::Path) -> std::io::Result<usize> {
     Ok(n)
 }
 
-fn read_profile(path: &std::path::Path) -> BTreeSet<u64> {
+fn read_profile(path: &std::path::Path) -> (BTreeSet<u64>, u64) {
     let mut s = BTreeSet::new();
+    let mut len = 0;
     if let Ok(d) = std::fs::read(path) {
+        // A concurrent appender may be mid-write: only whole entries count, and the length used
+        // as the "built from" generation is the part actually read.
+        len = (d.len() / 8 * 8) as u64;
         for c in d.chunks_exact(8) {
             s.insert(u64::from_le_bytes(c.try_into().unwrap()));
         }
     }
-    s
+    (s, len)
 }
 
-/// Save this run's profile; if it contains new blocks, rebuild AOT files in
-/// a background (forked) process.
 extern "C" {
     fn _NSGetArgc() -> *mut libc::c_int;
     fn _NSGetArgv() -> *mut *mut *mut libc::c_char;
@@ -335,37 +388,150 @@ unsafe fn retitle_builder() {
     std::ptr::copy_nonoverlapping(title.as_ptr(), start, title.len().min(room));
 }
 
-pub fn save_profile() {
-    if !ENABLED.load(Ordering::Relaxed) || SAVED.swap(true, Ordering::SeqCst) {
+/// An advisory `flock` on a file next to the cache files (released when dropped, or when the
+/// process dies).
+struct FileLock(i32);
+
+impl FileLock {
+    /// Try to take the exclusive lock without blocking; None if somebody else holds it.
+    fn try_exclusive(path: &std::path::Path) -> Option<FileLock> {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        unsafe {
+            let fd = libc::open(c.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC, 0o644);
+            if fd < 0 {
+                return None;
+            }
+            if libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) != 0 {
+                libc::close(fd);
+                return None;
+            }
+            Some(FileLock(fd))
+        }
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.0, libc::LOCK_UN);
+            libc::close(self.0);
+        }
+    }
+}
+
+/// What the `.aot` file of an image was built from: `<translator version> <flags> <profile bytes>`.
+fn read_built(img: &Image) -> Option<(u32, u32, u64)> {
+    let t = std::fs::read_to_string(file_for(img, "built")).ok()?;
+    let mut it = t.split_whitespace().map(|w| w.parse::<u64>().ok());
+    let v = it.next()??;
+    let f = it.next()??;
+    let l = it.next()??;
+    Some((v as u32, f as u32, l))
+}
+
+fn write_built(img: &Image, profile_len: u64) {
+    let path = file_for(img, "built");
+    let tmp = path.with_extension(format!("built.{}", std::process::id()));
+    if std::fs::write(&tmp, format!("{} {} {}\n", TRANSLATOR_VERSION, flags_word(), profile_len)).is_ok() {
+        let _ = std::fs::rename(tmp, path);
+    }
+}
+
+fn profile_len(img: &Image) -> u64 {
+    std::fs::metadata(file_for(img, "profile")).map(|m| m.len() / 8 * 8).unwrap_or(0)
+}
+
+/// Whether the image's `.aot` is missing or was built from an older profile or translator.
+fn is_dirty(img: &Image) -> bool {
+    let plen = profile_len(img);
+    if !file_for(img, "aot").exists() {
+        return plen > 0 || !img.entries.is_empty();
+    }
+    match read_built(img) {
+        Some((v, f, len)) => v != TRANSLATOR_VERSION || f != flags_word() || plen > len,
+        None => plen > 0,
+    }
+}
+
+/// Append the blocks of `fresh` that the profile file does not hold yet. The file is
+/// append-only (concurrent processes append whole 8-byte entries with O_APPEND, so no
+/// read-modify-write is needed and nothing is lost); the builder deduplicates when it reads it.
+fn append_profile(img: &Image, fresh: &[u64]) {
+    let path = file_for(img, "profile");
+    // Skip blocks already on disk (one streaming pass, only when there is something to add), so
+    // runs that cannot use the AOT file don't grow the profile with copies of it.
+    let mut want: Vec<u64> = fresh.to_vec();
+    want.sort_unstable();
+    want.dedup();
+    let mut have = vec![false; want.len()];
+    if let Ok(d) = std::fs::read(&path) {
+        for c in d.chunks_exact(8) {
+            if let Ok(i) = want.binary_search(&u64::from_le_bytes(c.try_into().unwrap())) {
+                have[i] = true;
+            }
+        }
+    }
+    let mut buf = Vec::with_capacity(want.len() * 8);
+    for (pc, _) in want.iter().zip(&have).filter(|(_, h)| !**h) {
+        buf.extend_from_slice(&pc.to_le_bytes());
+    }
+    if buf.is_empty() {
+        return;
+    }
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).mode(0o644).open(&path) {
+        let _ = f.write_all(&buf);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum SaveMode {
+    /// Write what is new to the profiles; never build (fork, execve, periodic timer).
+    Snapshot,
+    /// Write, then start a background builder for images whose AOT file is out of date (exit).
+    Exit,
+}
+
+/// Record this process's new blocks in the per-image profiles; in `Exit` mode also fork a
+/// builder for the images whose AOT file is out of date. Can be called any number of times.
+pub fn save_profile(mode: SaveMode) {
+    if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
     flush_pending();
+    let save = SAVE.lock().unwrap();
     let imgs = IMAGES.lock().unwrap().clone();
-    let seen = SEEN.lock().unwrap().clone();
+    let fresh: Vec<Vec<u64>> = SEEN.lock().unwrap().iter_mut().map(|s| std::mem::take(&mut s.fresh)).collect();
     let _ = std::fs::create_dir_all(cache_dir());
-    let mut rebuild = Vec::new();
     for (i, img) in imgs.iter().enumerate() {
-        let path = file_for(img, "profile");
-        let mut prof = read_profile(&path);
-        let before = prof.len();
-        prof.extend(seen[i].iter().copied());
-        let aot_missing = !file_for(img, "aot").exists();
-        if prof.len() != before || (aot_missing && (!prof.is_empty() || !img.entries.is_empty())) {
-            let mut buf = Vec::with_capacity(prof.len() * 8);
-            for pc in &prof {
-                buf.extend_from_slice(&pc.to_le_bytes());
-            }
-            let _ = std::fs::write(&path, buf);
-            rebuild.push((img.clone(), prof));
+        if !fresh[i].is_empty() {
+            append_profile(img, &fresh[i]);
         }
     }
-    if rebuild.is_empty() || std::env::var_os("MACLATOR_NO_AOT_BUILD").is_some() {
+    drop(save);
+    if mode != SaveMode::Exit || std::env::var_os("MACLATOR_NO_AOT_BUILD").is_some() {
+        return;
+    }
+    // One builder per image at a time (lock file next to the cache file): skip images whose
+    // builder is running; it re-reads the profile when it finishes, so it also picks up
+    // whatever this process just appended.
+    let rebuild: Vec<Image> = imgs.into_iter().filter(|img| is_dirty(img) && FileLock::try_exclusive(&file_for(img, "lock")).is_some()).collect();
+    if rebuild.is_empty() {
         return;
     }
     let sync = std::env::var_os("MACLATOR_AOT_SYNC").is_some();
-    // Fork: the child still has the guest's memory mapped, so it can read
-    // the code it needs to translate.
-    let pid = if sync { 0 } else { unsafe { libc::fork() } };
+    // Fork: the child still has the guest's memory mapped, so it can read the code it needs to
+    // translate. Hold the emulator's locks across the fork like the guest fork does: other threads
+    // may own them now and do not exist in the child.
+    let pid = if sync {
+        0
+    } else {
+        let locks = crate::jit::lock_for_fork();
+        let pid = unsafe { libc::fork() };
+        drop(locks);
+        pid
+    };
     if pid != 0 {
         return;
     }
@@ -379,11 +545,35 @@ pub fn save_profile() {
             libc::dup2(null, 2);
         }
     }
-    for (img, prof) in rebuild {
-        let _ = build(&img, &prof);
+    for img in rebuild {
+        build_image(&img);
     }
     if !sync {
         unsafe { libc::_exit(0) };
+    }
+}
+
+/// Build one image's AOT file under its lock, repeating while the profile keeps growing.
+fn build_image(img: &Image) {
+    let mut last_len = u64::MAX;
+    loop {
+        if !is_dirty(img) {
+            return;
+        }
+        let Some(_lock) = FileLock::try_exclusive(&file_for(img, "lock")) else { return };
+        if !is_dirty(img) {
+            return;
+        }
+        let (prof, len) = read_profile(&file_for(img, "profile"));
+        if len == last_len {
+            return; // nothing new since the last pass (e.g. no block could be translated)
+        }
+        last_len = len;
+        if build(img, &prof).is_ok() {
+            write_built(img, len);
+        } else {
+            return;
+        }
     }
 }
 
@@ -525,8 +715,9 @@ pub fn build_standalone(path: &str) -> std::io::Result<usize> {
     let key = format!("main-{}-{}", hex(&m.uuid), fnv(&[path.as_bytes()]));
     let img = Image { name: path.to_string(), key, start: img_start, end: img_end, entries, loaded: false };
     let _ = std::fs::create_dir_all(cache_dir());
-    let prof = read_profile(&file_for(&img, "profile"));
+    let (prof, len) = read_profile(&file_for(&img, "profile"));
     build(&img, &prof)?;
+    write_built(&img, len);
     let n = load_count(&file_for(&img, "aot"));
     Ok(n)
 }

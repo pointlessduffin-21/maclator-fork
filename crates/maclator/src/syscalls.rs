@@ -182,7 +182,7 @@ fn bsd_inner(cpu: &mut Cpu, n: u64, mut args: [u64; 8]) {
             // fork (not the raw syscall) so the host libSystem re-initialises in the child
             // (mach_task_self, MIG reply ports, ...); the JIT reads guest memory through
             // mach_vm_read with the cached task port.
-            crate::engine::flush_profile();
+            crate::engine::flush_profile(crate::aot::SaveMode::Snapshot);
             // Hold the emulator's own locks across fork: other host threads may own them at
             // this instant, and they don't exist in the child to release them.
             let jit_locks = crate::jit::lock_for_fork();
@@ -194,6 +194,7 @@ fn bsd_inner(cpu: &mut Cpu, n: u64, mut args: [u64; 8]) {
                 set_err(cpu, unsafe { *libc::__error() } as u64);
             } else if pid == 0 {
                 crate::logtee::reopen_after_fork();
+                crate::aot::after_fork_child();
                 // Child: XNU returns the parent's pid with the "is child" flag in x1.
                 set_ok(cpu, unsafe { libc::getppid() } as u64, 1);
             } else {
@@ -201,7 +202,7 @@ fn bsd_inner(cpu: &mut Cpu, n: u64, mut args: [u64; 8]) {
             }
         }
         SYS_EXIT => {
-            crate::engine::flush_profile();
+            crate::engine::flush_profile(crate::aot::SaveMode::Exit);
             let r = hostsys::unix(SYS_EXIT, &args);
             set_res(cpu, r);
         }
@@ -346,7 +347,7 @@ fn bsd_inner(cpu: &mut Cpu, n: u64, mut args: [u64; 8]) {
         },
         SYS_EXECVE | SYS_POSIX_SPAWN => {
             if n == SYS_EXECVE {
-                crate::engine::flush_profile();
+                crate::engine::flush_profile(crate::aot::SaveMode::Snapshot);
             }
             let r = crate::spawn::exec_like(n, &args);
             set_res(cpu, r);

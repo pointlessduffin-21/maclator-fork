@@ -21,8 +21,8 @@ pub fn invalidate_range(_addr: u64, _len: u64) {
     crate::jit::invalidate_range(_addr, _len);
 }
 
-pub fn flush_profile() {
-    crate::jit::flush_profile();
+pub fn flush_profile(mode: crate::aot::SaveMode) {
+    crate::jit::flush_profile(mode);
 }
 
 /// Registry of running guest CPUs (for SIGUSR1 diagnostics).

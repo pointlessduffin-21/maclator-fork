@@ -515,8 +515,8 @@ pub fn stats_snapshot() -> (u64, u64, u64, u64, u64) {
     )
 }
 
-pub fn flush_profile() {
-    crate::aot::save_profile();
+pub fn flush_profile(mode: crate::aot::SaveMode) {
+    crate::aot::save_profile(mode);
     if std::env::var_os("MACLATOR_STATS").is_some() {
         eprintln!(
             "[maclator] jit: {} blocks, {} insns translated ({} via interpreter helper), {:.1} ms translating; {} block entries; {} blocks interpreted (cold)",
