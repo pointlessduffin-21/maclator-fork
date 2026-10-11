@@ -28,6 +28,9 @@ done
 lipo -create .build/Hello-arm64 .build/Hello-x86_64 -output "$OUT/Contents/MacOS/Hello"
 cp "$FONTS"/*.ttf "$OUT/Contents/Resources/Fonts/"
 cp "$ICON" "$OUT/Contents/Resources/AppIcon.icns"
+# Same version as Maclator (../../VERSION).
+VERSION=$(tr -d '[:space:]' < ../../VERSION)
+BUILD=$(git rev-list --count HEAD 2>/dev/null || echo 1)
 cat > "$OUT/Contents/Info.plist" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -39,8 +42,9 @@ cat > "$OUT/Contents/Info.plist" <<PL
   <key>CFBundleExecutable</key><string>Hello</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION%%-*}</string>
+  <key>CFBundleVersion</key><string>$BUILD</string>
+  <key>MaclatorVersion</key><string>$VERSION</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>ATSApplicationFontsPath</key><string>Fonts</string>
   <key>NSHighResolutionCapable</key><true/>

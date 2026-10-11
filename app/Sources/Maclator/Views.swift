@@ -7,13 +7,14 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 enum Screen: String, CaseIterable, Identifiable {
-    case library, running, setup
+    case library, running, setup, changelog
     var id: String { rawValue }
     var title: String {
         switch self {
         case .library: "Library"
         case .running: "Running"
         case .setup: "Setup"
+        case .changelog: "Changelog"
         }
     }
     var symbol: String {
@@ -21,6 +22,7 @@ enum Screen: String, CaseIterable, Identifiable {
         case .library: "square.grid.2x2"
         case .running: "play.circle"
         case .setup: "wrench.and.screwdriver"
+        case .changelog: "list.bullet.rectangle"
         }
     }
 }
@@ -39,6 +41,7 @@ struct RootView: View {
                 case .library: LibraryView(selection: $selection)
                 case .running: RunningView(screen: $screen, selection: $selection)
                 case .setup: SetupView()
+                case .changelog: ChangelogView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -94,7 +97,13 @@ struct Sidebar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Maclator").font(Paper.serif(26)).padding(.horizontal, 8).padding(.bottom, 4)
-            Text("arm64 apps on Intel").font(Paper.sans(12.5)).foregroundStyle(Paper.ink3).padding(.horizontal, 8).padding(.bottom, 24)
+            Text("arm64 apps on Intel").font(Paper.sans(12.5)).foregroundStyle(Paper.ink3).padding(.horizontal, 8)
+            Button { screen = .changelog } label: {
+                Text("v" + AppVersion.string).font(Paper.mono(10.5)).foregroundStyle(Paper.ink3)
+            }
+            .buttonStyle(.plain)
+            .help("What's new in this version")
+            .padding(.horizontal, 8).padding(.top, 4).padding(.bottom, 24)
             ForEach(Screen.allCases) { s in
                 Button { screen = s } label: {
                     HStack(spacing: 10) {
@@ -658,7 +667,7 @@ struct SetupView: View {
                     Button { launcher.refresh() } label: { Text("Check again") }.buttonStyle(PaperButtonStyle(small: true))
                 }) {
                     VStack(alignment: .leading, spacing: 0) {
-                        CheckRow(ok: i.maclator != nil, title: "Maclator", detail: i.maclator?.path ?? "Run scripts/install.sh in the repository.")
+                        CheckRow(ok: i.maclator != nil, title: "Maclator" + (i.maclatorVersion.map { " " + $0 } ?? ""), detail: i.maclator?.path ?? "Run scripts/install.sh in the repository.")
                         Hairline()
                         CheckRow(ok: i.sysroot != nil, title: "arm64 system libraries", detail: i.sysroot?.path ?? "Run scripts/fetch-sysroot.sh (about 5.5 GB).")
                         Hairline()
@@ -672,7 +681,7 @@ struct SetupView: View {
                     Pane { KPI(label: "Translation cache", value: ByteCountFormatter.string(fromByteCount: i.aotBytes, countStyle: .file), note: "speeds up later launches") }
                     Pane { KPI(label: "This Mac", value: "\(ProcessInfo.processInfo.processorCount) threads", note: cpuModel()) }
                 }
-                Note(text: "Apps save their translations when they quit normally. An app that is force-stopped saves nothing, and its next launch is slow again.")
+                Note(text: "Apps save what they ran every 30 seconds and when they quit, and the translations are built in the background, so later launches are faster. A force-stopped app keeps only what was saved before it stopped.")
             }
             .padding(.horizontal, 36)
             .padding(.vertical, 30)
@@ -701,7 +710,7 @@ struct ArmTestPane: View {
     var body: some View {
         Pane(title: "Test it") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Hello.app is a small app built for Apple silicon only, carried inside Maclator. If it opens and greets you with “Hello, I am ARM.”, arm64 apps run on this Mac. It also lists what it sees: architecture, CPU, OS and memory.")
+                Text("Hello.app is a small universal app carried inside Maclator. Run here, its arm64 code goes through Maclator: if it greets you with “Hello, I am ARM.”, arm64 apps run on this Mac. (Opened normally on an Intel Mac it says “Hello, I am Intel.”) It also lists what it sees: architecture, CPU, OS and memory.")
                     .font(Paper.sans(13.5)).foregroundStyle(Paper.ink2).fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 12) {
                     if let app = hello {

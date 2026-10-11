@@ -24,7 +24,12 @@ mod workq;
 
 use std::sync::atomic::Ordering;
 
+/// The release version, from the repository's VERSION file (the single source of the version number;
+/// app/build.sh and examples/hello-arm/build.sh read the same file).
+pub const VERSION: &str = include_str!("../../../VERSION");
+
 fn usage() -> ! {
+    eprintln!("maclator {}", VERSION.trim());
     eprintln!("usage: maclator [options] <arm64-program> [args...]");
     eprintln!("       maclator --aot <arm64-program>     translate ahead of time and exit");
     eprintln!("options:");
@@ -141,6 +146,10 @@ fn main() {
                 std::process::exit(0);
             }
             "-h" | "--help" => usage(),
+            "-V" | "--version" => {
+                println!("maclator {}", VERSION.trim());
+                std::process::exit(0);
+            }
             _ => break,
         }
     }

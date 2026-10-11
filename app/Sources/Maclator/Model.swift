@@ -9,6 +9,8 @@ import Security
 /// Where the pieces of a Maclator install are, and whether they are there.
 struct Install {
     var maclator: URL?
+    /// What `maclator --version` says (nil for builds older than 0.1.0-beta.2).
+    var maclatorVersion: String?
     var sysroot: URL?
     var gpuBridge: URL?
     var homebrew: URL?
@@ -39,12 +41,27 @@ struct Install {
 
         let brew = URL(fileURLWithPath: "/opt/homebrew/bin/brew")
         let aot = home.appending(path: "Library/Caches/Maclator/aot")
-        return Install(maclator: maclator, sysroot: sysroot, gpuBridge: gpu,
+        return Install(maclator: maclator, maclatorVersion: maclator.flatMap(versionOf), sysroot: sysroot, gpuBridge: gpu,
                        homebrew: fm.fileExists(atPath: brew.path) ? brew : nil,
                        aotCache: aot, aotBytes: directorySize(aot))
     }
 
     var ready: Bool { maclator != nil && sysroot != nil }
+
+    /// "0.1.0-beta.2" from `maclator --version` ("maclator 0.1.0-beta.2").
+    static func versionOf(_ maclator: URL) -> String? {
+        let p = Process()
+        p.executableURL = maclator
+        p.arguments = ["--version"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        p.waitUntilExit()
+        let s = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        guard p.terminationStatus == 0, s.hasPrefix("maclator ") else { return nil }
+        return s.dropFirst("maclator ".count).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 func directorySize(_ url: URL) -> Int64 {

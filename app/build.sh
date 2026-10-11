@@ -16,6 +16,10 @@ for a in "$@"; do
   esac
 done
 OUT=out/Maclator.app
+# One version for the repository (../VERSION, e.g. 0.1.0-beta.2): Finder gets the numeric part, the build number
+# is the commit count, and the full string goes in MaclatorVersion for the launcher to show.
+VERSION=$(tr -d '[:space:]' < ../VERSION)
+BUILD=$(git rev-list --count HEAD 2>/dev/null || echo 1)
 FONTS=.fonts
 GF=https://github.com/google/fonts/raw/main/ofl
 
@@ -45,7 +49,7 @@ rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources/Fonts"
 cp "$BIN" "$OUT/Contents/MacOS/Maclator"
 cp "$FONTS"/*.ttf "$OUT/Contents/Resources/Fonts/"
-cp ../docs/compatibility.json "$OUT/Contents/Resources/"
+cp ../docs/compatibility.json ../CHANGELOG.md "$OUT/Contents/Resources/"
 cp "$ICON" "$OUT/Contents/Resources/AppIcon.icns"
 cat > "$OUT/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -58,8 +62,9 @@ cat > "$OUT/Contents/Info.plist" <<EOF
   <key>CFBundleExecutable</key><string>Maclator</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
-  <key>CFBundleShortVersionString</key><string>0.1</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION%%-*}</string>
+  <key>CFBundleVersion</key><string>$BUILD</string>
+  <key>MaclatorVersion</key><string>$VERSION</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSArchitecturePriority</key><array><string>x86_64</string></array>
   <key>ATSApplicationFontsPath</key><string>Fonts</string>
