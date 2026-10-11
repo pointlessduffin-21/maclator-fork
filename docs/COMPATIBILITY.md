@@ -9,7 +9,7 @@ What was tried under Maclator, and how it went. Generated from [compatibility.js
 
 Times are to the first window on a first launch with an empty translation cache; later launches are faster.
 
-Tested on: Intel Core i5-10310U (4 cores / 8 threads), Intel UHD Graphics, macOS 26.6.
+Tested on: HP EliteBook 840 G7 Hackintosh: Intel Core i5-10310U (4 cores / 8 threads), 16 GB, Intel UHD 620, macOS Tahoe 26.6 (OpenCore 1.0.8, OCLP-X root patch).
 
 To add your own results, run apps from Maclator.app (it records each run on your Mac), then `scripts/compat.py import && scripts/compat.py markdown`.
 
