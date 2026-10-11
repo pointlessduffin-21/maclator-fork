@@ -172,6 +172,20 @@ impl Unit {
                 a.lea(rax, qword_ptr(s.slot)).unwrap();
                 a.mov(qword_ptr(r15 + off::EXIT_DATA), rax).unwrap();
             } else {
+                // AOT code is shared and read-only in spirit: it cannot patch a chain slot, so
+                // probe the per-thread indirect-branch table first (position independent, no
+                // writes to code) and only return to the dispatcher on a miss. Without this every
+                // block-to-block transition between chunks bounced through the dispatcher.
+                let mut l_miss = a.create_label();
+                a.mov(rcx, rax).unwrap();
+                a.shr(ecx, 2).unwrap();
+                a.and(ecx, (crate::jit::IBTC_SIZE - 1) as i32).unwrap();
+                a.shl(ecx, 4).unwrap();
+                a.add(rcx, qword_ptr(r15 + off::IBTC)).unwrap();
+                a.cmp(rax, qword_ptr(rcx)).unwrap();
+                a.jne(l_miss).unwrap();
+                a.jmp(qword_ptr(rcx + 8)).unwrap();
+                a.set_label(&mut l_miss).unwrap();
                 a.mov(qword_ptr(r15 + off::EXIT_DATA), 0).unwrap();
             }
             a.mov(qword_ptr(r15 + off::EXIT_REASON), EXIT_CONTINUE as i32).unwrap();
