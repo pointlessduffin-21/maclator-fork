@@ -371,6 +371,88 @@ In this order, each measurable on its own:
    slide ms, profile save ms, interpreter ms, process CPU and max RSS), and forward `--no-aot` and
    `MACLATOR_CACHE` to children.
 
+### Phase 0 results (branch `speed`, 2026-10-11)
+
+All six items are implemented, each as its own commit, and each was checked with `--selftest-jit`
+(dpimm, dpreg, branch, fuse, blocks: mismatch=0), `cargo test`, guest programs (hello, fork, thread
+suspend/resume, JavaScriptCore), `brew list` and AppCleaner (window appears, quit by Apple event). What
+changed, in the order of the plan:
+
+1. **Fat libraries.** `SYS_MMAP` offers every readable, executable, file-backed mapping to
+   `register_image_at`, which already validates the arm64 Mach-O header. Electron Framework's arm64 slice now has a
+   `lib-<uuid>-<base>.aot` (130–180 MB). A hand-made universal dylib (slice at offset 49,152) is registered too.
+2. **Repeated saves, one builder per image.** The profile is append-only; a process appends what is new at
+   `fork`, `execve`, exit and every 30 s (timer thread, no JIT locks, started again in forked children). The builder
+   runs under a `flock` per image; `<key>.built` tells whether the `.aot` is out of date (it also detects a
+   `TRANSLATOR_VERSION` bump, which the old logic missed when the profile did not grow). The builder fork now
+   holds the same locks as a guest fork.
+3. **Pre-slid shared cache** (`slid-<cache uuid>-<slide>-<n>.bin`, ~500 MB, written by the first process in
+   13–18 s, mapped `MAP_PRIVATE` afterwards).
+4. **IBTC probe in AOT exit stubs**, `TRANSLATOR_VERSION` 16.
+5. **Lazy per-chunk loading** (`MCLAOT05`, 1,024-block chunks). The profile is not read at exit unless something
+   new was recorded.
+6. **Phase counters** (`MACLATOR_STATS` `phases:` line and SIGUSR2 `[phases]`), and `--no-aot` / `--cache-dir` /
+   `MACLATOR_CACHE` forwarded to children (done first, because honest scratch-cache measurements need it).
+
+**Measured.** Same machine as above, but under a heavier load than in the study (load average 5–15 during the
+runs, so absolute times are 1.5–2.5× the study's and noisy; compare the pairs). "Before" is the commit this branch
+started from plus the forwarding commit; "after" is the last commit. Scratch cache directories, CLI numbers from
+`/usr/bin/time -l` (real / CPU / max RSS), AppCleaner and Termius started with `--arm64-children`.
+
+| | before | after |
+|---|---|---|
+| `hello`, warm AOT cache | 2.23–2.29 s / 2.1 s / 376 MB | **0.56–0.73 s / 0.5–0.7 s / 27 MB** |
+| `hello --no-aot` | 2.29–2.55 s / 2.2–2.4 s / 351 MB | 0.85–1.23 s / 0.8–1.2 s / 9 MB |
+| `hello`, empty cache (pre-slid files present) | 2.44 s / 351 MB | 1.26 s / 10 MB |
+| `fastfetch --pipe`, warm | 4.7–5.1 s / 4.5–4.8 s / 382 MB, 1.03 M dispatcher entries | **1.33–1.69 s / 1.2–1.5 s / 81 MB, 44 k entries** |
+| `fastfetch --pipe --no-aot` | 8.4–9.0 s / 352 MB | 6.7–7.2 s / 47 MB |
+| AppCleaner, first window, empty cache | 17 s (earlier run: 37 s, no save) | 14–35 s (load-dominated; 107 k blocks translated, as before) |
+| AppCleaner, first window, warm | 6 s, 12.5 M block entries | **3–9 s, 0.8–1.1 M block entries** |
+| Termius, first window, empty cache | 82 s | 46 s (46–78 s over five runs) |
+| Termius, second launch | 66 s; main process translated 61 k blocks | **12 s; main process translated 22 k** |
+| Termius, third / fourth launch | – | 13 s / 11 s |
+
+(An earlier, quieter pass: `hello` warm 0.97–1.05 s / 376 MB before, 0.45–0.60 s / 27 MB after; `fastfetch` warm
+2.8–3.2 s / 717 MB before, 1.5–1.7 s / 81 MB after.)
+
+Per item, on the metric the plan named:
+
+- Item 1: second launch of Termius, main process, blocks translated 61 k → 7.2 k with only this change
+  (66 s → 47 s to the window), helper processes 25 k → 0.
+- Item 2: the shared-cache profile after a Termius launch (302 k entries) is larger than the main process's
+  translated count (237 k), and at most two builder processes were seen at once (a parent's and its forked child's; builds of the
+  same image are serialised by the lock file, the second one exits when it cannot take it). The 4-second-timer test (`kill -9` after 9 s)
+  leaves profiles on disk.
+- Item 3: `hello --no-aot` 351 MB → 9–10 MB RSS; the slide phase is 25–55 ms per process (was 670–900 ms).
+- Item 4: warm AppCleaner block entries 12.5 M → 0.8 M.
+- Item 5: `hello` with a warm cache is faster than `--no-aot` (0.56–0.73 s vs 0.85–1.23 s); AOT load for `hello`
+  is 16–24 ms (10 chunks). For a program that runs a lot of the file the cost is still visible: warm AppCleaner
+  loads 145–590 chunks in 240–360 ms, Termius' main process 800 ms for ~1,700 chunks. The goal "under 100 ms" holds
+  for small programs, not for an app that touches most of the file.
+- Item 6: counters exist; `--no-aot` and the cache directory reach children (checked with a guest that
+  `fork`/`exec`s another arm64 program).
+
+**What did not work, or turned out different from the study.**
+
+- Termius never gets an *on-screen* window here (the windows exist, `kCGWindowIsOnscreen` stays 0, CPU goes idle at
+  the time the study reported its window). "Window" in the Termius rows is the first layer-0 window of the process
+  tree that is at least 500 px wide in any state; for AppCleaner it is the on-screen window. A first Termius attempt
+  without `--disable-gpu-sandbox` hung with GPU-process errors; the launcher passes that flag for Chromium apps.
+- The warm Termius main process still translates ~20 k blocks and each renderer ~60 k (V8-generated code is the
+  likely reason; not verified), so "a few thousand" was not reached. Helpers that are not renderers do reach ~0.
+- Lazy loading does not reduce the work for an app that uses most of the file: it moves it from start-up to the first
+  use of each chunk, and the chunk is the unit of copy. It makes small programs cheap, which is where the
+  fixed cost hurt. Chunks went from 4,096 to 1,024 blocks for that reason (not measured separately).
+- The first run after a shared-cache change pays 13–18 s to write the pre-slid files (disk-bound); `MACLATOR_NO_SLID=1`
+  skips it. Old `slid-*.bin` and `.aot` files are not cleaned up.
+- A bug found only by a multi-process run: the first version of lazy loading raced with the JIT on the code cache
+  (`code cache raced` assertion in Termius' main process, once in the runs before the fix). Fixed by taking the
+  translator lock for chunk copies. Any other code that allocates code-cache space outside `translate_inner` has the
+  same problem.
+- SIGTERM kills a guest without running its exit path, so it does not save a profile (only the 30 s timer and the
+  fork/exec snapshots do); a quit through an Apple event or the guest's own `exit` does.
+- Not done: putting AOT blocks into `INDEX` (invalidation of AOT code), the study's table row for it.
+
 ### Phase 1: a fast emitter (2–4 weeks)
 
 Replace iced's `CodeAssembler`/`BlockEncoder` in `jit/emit.rs` and `jit/mod.rs` with a direct encoder
