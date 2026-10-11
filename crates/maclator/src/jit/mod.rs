@@ -242,10 +242,13 @@ pub fn lookup(pc: u64) -> Option<u64> {
     BLOCKS.read().as_ref().and_then(|m| m.get(&pc).copied())
 }
 
-/// Register externally produced code (AOT) for `pc`.
-pub fn register_block(pc: u64, host: u64) {
+/// Register externally produced code (AOT chunks) for many blocks under one lock.
+pub fn register_blocks(blocks: &[(u64, u64)]) {
     let mut g = BLOCKS.write();
-    g.get_or_insert_with(FastMap::default).entry(pc).or_insert(host);
+    let m = g.get_or_insert_with(FastMap::default);
+    for &(pc, host) in blocks {
+        m.entry(pc).or_insert(host);
+    }
 }
 
 // ---------------- helpers called from generated code ----------------
@@ -418,7 +421,7 @@ pub fn lock_for_fork() -> ForkLocks {
 }
 
 fn lookup_or_translate(pc: u64) -> u64 {
-    lookup(pc).unwrap_or_else(|| translate(pc))
+    lookup(pc).or_else(|| crate::aot::lazy_lookup(pc)).unwrap_or_else(|| translate(pc))
 }
 
 /// Drop the translations built from guest code in [addr, addr+len) (self-modifying code,
@@ -722,17 +725,24 @@ pub fn run(cpu: &mut Cpu) {
                     *c += 1;
                     *c
                 });
-                if n == 1 {
-                    crate::aot::note_translated(pc);
-                }
-                if n < hot_threshold() {
-                    STATS_INTERP_BLOCKS.fetch_add(1, Ordering::Relaxed);
-                    if !interp_block(cpu) {
-                        return;
+                // First miss of this block in this thread: an AOT file may have it (its chunk is
+                // copied into the code cache now); otherwise record it for the next AOT build.
+                let lazy = if n == 1 { crate::aot::lazy_lookup(pc) } else { None };
+                if let Some(h) = lazy {
+                    h
+                } else {
+                    if n == 1 {
+                        crate::aot::note_translated(pc);
                     }
-                    continue;
+                    if n < hot_threshold() {
+                        STATS_INTERP_BLOCKS.fetch_add(1, Ordering::Relaxed);
+                        if !interp_block(cpu) {
+                            return;
+                        }
+                        continue;
+                    }
+                    translate(pc)
                 }
-                translate(pc)
             }
         };
         STATS_JIT_ENTRIES.fetch_add(1, Ordering::Relaxed);

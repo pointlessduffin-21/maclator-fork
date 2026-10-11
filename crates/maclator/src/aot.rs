@@ -13,6 +13,13 @@
 //!
 //! On exit, if new blocks were seen, a forked child rebuilds the AOT files in
 //! the background, so the next launch starts with warm translations.
+//!
+//! File layout (`MCLAOT05`): 64-byte header (magic, translator version, flags, block count,
+//! code length, chunk count), the block index (`pc`, code offset; sorted by pc), the chunk table
+//! (first index entry, code offset), padding, then the code. Code is laid out in chunks of 4,096
+//! blocks; jumps never cross a chunk, so a chunk is the unit that is copied into the JIT code
+//! cache, and only when one of its blocks is first needed (`lazy_lookup`). Loading a file is
+//! just mapping it read-only.
 
 use crate::jit::emit::{self, StubKind, Unit};
 use iced_x86::BlockEncoderOptions;
@@ -21,7 +28,7 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-const MAGIC: &[u8; 8] = b"MCLAOT04";
+const MAGIC: &[u8; 8] = b"MCLAOT05";
 /// Bump when the translator's output changes.
 const TRANSLATOR_VERSION: u32 = 16;
 
@@ -237,13 +244,14 @@ pub struct ForkLocks(
     #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
     #[allow(dead_code)] std::sync::MutexGuard<'static, Vec<Image>>,
     #[allow(dead_code)] std::sync::MutexGuard<'static, Vec<SeenSet>>,
+    #[allow(dead_code)] std::sync::MutexGuard<'static, Vec<LazyFile>>,
 );
 
-/// Lock order: SAVE, IMAGES, SEEN (the save path takes them in the same order and holds no
-/// JIT lock while it does).
+/// Lock order: SAVE, IMAGES, SEEN, LAZY (the save and load paths take them in the same order and
+/// hold no JIT lock except BLOCKS, which comes last, while they do).
 pub fn lock_for_fork() -> ForkLocks {
     let save = SAVE.lock().unwrap();
-    ForkLocks(save, IMAGES.lock().unwrap(), SEEN.lock().unwrap())
+    ForkLocks(save, IMAGES.lock().unwrap(), SEEN.lock().unwrap(), LAZY.lock().unwrap())
 }
 
 /// Called in a forked guest child: it is a new process and needs its own periodic-save timer.
@@ -285,69 +293,157 @@ fn file_for(img: &Image, ext: &str) -> std::path::PathBuf {
     cache_dir().join(format!("{}.{}", img.key, ext))
 }
 
-/// Load AOT code for any registered image not loaded yet.
+/// Make the AOT files of any registered image not yet opened available to `lazy_lookup`.
 pub fn ensure_loaded() {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
+    let t0 = std::time::Instant::now();
     let mut imgs = IMAGES.lock().unwrap();
     for img in imgs.iter_mut() {
         if img.loaded {
             continue;
         }
         img.loaded = true;
-        match load_file(&file_for(img, "aot")) {
-            Ok(n) if n > 0 => {
-                if std::env::var_os("MACLATOR_TRACE").is_some() || std::env::var_os("MACLATOR_STATS").is_some() {
-                    eprintln!("[maclator] aot: loaded {n} blocks for {}", img.name);
-                }
+        if let Some(f) = open_lazy(img) {
+            if std::env::var_os("MACLATOR_TRACE").is_some() || std::env::var_os("MACLATOR_STATS").is_some() {
+                eprintln!("[maclator] aot: {} blocks available for {} (mapped, loaded on demand)", f.n, img.name);
             }
-            _ => {}
+            LAZY.lock().unwrap().push(f);
         }
     }
+    STATS_LOAD_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
 }
 
+const HDR: usize = 64;
 const CODE_ALIGN: usize = 0x4000;
+/// Blocks per chunk (one assembler run, and the unit of lazy loading).
+const CHUNK_BLOCKS: usize = 4096;
 
-fn code_offset(n: usize) -> usize {
-    (32 + n * 16 + CODE_ALIGN - 1) & !(CODE_ALIGN - 1)
+fn code_offset(n: usize, nchunks: usize) -> usize {
+    (HDR + n * 16 + nchunks * 16 + CODE_ALIGN - 1) & !(CODE_ALIGN - 1)
 }
 
-fn load_file(path: &std::path::Path) -> std::io::Result<usize> {
-    let mut f = std::fs::File::open(path)?;
-    let mut head = [0u8; 32];
-    if f.read_exact(&mut head).is_err() || &head[..8] != MAGIC {
-        return Ok(0);
+/// An AOT file mapped read-only; chunks are copied into the code cache when first used.
+struct LazyFile {
+    start: u64,
+    end: u64,
+    map: *const u8,
+    n: usize,
+    nchunks: usize,
+    code_off: usize,
+    code_len: usize,
+    /// Host address of each chunk once copied (0 = not yet).
+    loaded: Vec<u64>,
+}
+
+// The mapping is read-only and never unmapped.
+unsafe impl Send for LazyFile {}
+
+static LAZY: Mutex<Vec<LazyFile>> = Mutex::new(Vec::new());
+/// Time spent opening AOT files and copying chunks (ns), and chunks copied.
+pub static STATS_LOAD_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static STATS_CHUNKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl LazyFile {
+    fn rd64(&self, off: usize) -> u64 {
+        unsafe { std::ptr::read_unaligned(self.map.add(off) as *const u64) }
     }
-    let rd32 = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
-    let rd64 = |b: &[u8], o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
-    if rd32(&head, 8) != TRANSLATOR_VERSION || rd32(&head, 12) != flags_word() {
-        return Ok(0);
+    /// Index entry `i`: (guest pc, code offset).
+    fn idx(&self, i: usize) -> (u64, u64) {
+        (self.rd64(HDR + i * 16), self.rd64(HDR + i * 16 + 8))
     }
-    let n = rd64(&head, 16) as usize;
-    let code_len = rd64(&head, 24) as usize;
-    let code_off = code_offset(n);
-    let mut idx = vec![0u8; n * 16];
-    f.read_exact(&mut idx)?;
-    if f.metadata()?.len() < (code_off + code_len) as u64 {
-        return Ok(0);
+    /// Chunk `k`: (first index entry, code offset).
+    fn chunk(&self, k: usize) -> (u64, u64) {
+        let o = HDR + self.n * 16 + k * 16;
+        (self.rd64(o), self.rd64(o + 8))
     }
-    // Copy the code into the JIT code cache. (Mapping the file itself PROT_EXEC makes macOS
-    // run a Gatekeeper assessment on every cache file and pop up "could not verify" dialogs.)
-    let cc = crate::jit::code_cache();
-    let base = cc.alloc(code_len as u64);
-    {
-        use std::io::Seek;
-        f.seek(std::io::SeekFrom::Start(code_off as u64))?;
-        let dst = unsafe { std::slice::from_raw_parts_mut(base as *mut u8, code_len) };
-        f.read_exact(dst)?;
+    fn load_chunk(&mut self, k: usize) {
+        let (first, coff) = self.chunk(k);
+        let (next_first, next_coff) = if k + 1 < self.nchunks { self.chunk(k + 1) } else { (self.n as u64, self.code_len as u64) };
+        let len = (next_coff - coff) as usize;
+        // Copy into the JIT code cache. (Mapping the file itself PROT_EXEC makes macOS run a
+        // Gatekeeper assessment on every cache file and pop up "could not verify" dialogs.)
+        let base = crate::jit::code_cache().alloc(len as u64);
+        unsafe { std::ptr::copy_nonoverlapping(self.map.add(self.code_off + coff as usize), base as *mut u8, len) };
+        let blocks: Vec<(u64, u64)> = (first as usize..next_first as usize)
+            .map(|i| {
+                let (pc, off) = self.idx(i);
+                (pc, base + (off - coff))
+            })
+            .collect();
+        crate::jit::register_blocks(&blocks);
+        self.loaded[k] = base;
+        STATS_CHUNKS.fetch_add(1, Ordering::Relaxed);
     }
-    for i in 0..n {
-        let pc = rd64(&idx, i * 16);
-        let off = rd64(&idx, i * 16 + 8);
-        crate::jit::register_block(pc, base + off);
+}
+
+fn open_lazy(img: &Image) -> Option<LazyFile> {
+    use std::os::unix::io::AsRawFd;
+    let f = std::fs::File::open(file_for(img, "aot")).ok()?;
+    let len = f.metadata().ok()?.len() as usize;
+    if len < HDR {
+        return None;
     }
-    Ok(n)
+    let map = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_PRIVATE, f.as_raw_fd(), 0) };
+    if map == libc::MAP_FAILED {
+        return None;
+    }
+    let map = map as *const u8;
+    let bad = |m: *const u8| {
+        unsafe { libc::munmap(m as *mut _, len) };
+        None
+    };
+    let rd32 = |o: usize| unsafe { std::ptr::read_unaligned(map.add(o) as *const u32) };
+    let rd64 = |o: usize| unsafe { std::ptr::read_unaligned(map.add(o) as *const u64) };
+    if unsafe { std::slice::from_raw_parts(map, 8) } != MAGIC || rd32(8) != TRANSLATOR_VERSION || rd32(12) != flags_word() {
+        return bad(map);
+    }
+    let (n, code_len, nchunks) = (rd64(16) as usize, rd64(24) as usize, rd64(32) as usize);
+    if n == 0 || nchunks == 0 || nchunks > n || len < code_offset(n, nchunks) + code_len {
+        return bad(map);
+    }
+    Some(LazyFile { start: img.start, end: img.end, map, n, nchunks, code_off: code_offset(n, nchunks), code_len, loaded: vec![0; nchunks] })
+}
+
+/// Host code for the guest block at `pc` if an AOT file has it, copying its chunk into the code
+/// cache and registering the chunk's blocks on first use.
+pub fn lazy_lookup(pc: u64) -> Option<u64> {
+    let t0 = std::time::Instant::now();
+    let mut g = LAZY.lock().unwrap();
+    let f = g.iter_mut().find(|f| pc >= f.start && pc < f.end)?;
+    let (mut lo, mut hi) = (0usize, f.n);
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if f.idx(mid).0 < pc {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo >= f.n {
+        return None;
+    }
+    let (p, off) = f.idx(lo);
+    if p != pc {
+        return None;
+    }
+    // Last chunk whose first entry is at or before `lo`.
+    let (mut clo, mut chi) = (0usize, f.nchunks);
+    while clo < chi {
+        let mid = (clo + chi) / 2;
+        if f.chunk(mid).0 as usize <= lo {
+            clo = mid + 1;
+        } else {
+            chi = mid;
+        }
+    }
+    let k = clo.checked_sub(1)?;
+    if f.loaded[k] == 0 {
+        f.load_chunk(k);
+        STATS_LOAD_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    Some(f.loaded[k] + (off - f.chunk(k).1))
 }
 
 fn read_profile(path: &std::path::Path) -> (BTreeSet<u64>, u64) {
@@ -640,7 +736,8 @@ fn build(img: &Image, profile: &BTreeSet<u64>) -> std::io::Result<()> {
     // Translate in chunks so a single assembler run stays manageable.
     let mut code: Vec<u8> = Vec::new();
     let mut index: Vec<(u64, u64)> = Vec::new();
-    for chunk in blocks.chunks(4096) {
+    let mut chunks: Vec<(u64, u64)> = Vec::new();
+    for chunk in blocks.chunks(CHUNK_BLOCKS) {
         let mut u = Unit::new(StubKind::Plain, crate::jit::commpage_checks());
         for &pc in chunk {
             let l = u.a.create_label();
@@ -655,6 +752,7 @@ fn build(img: &Image, profile: &BTreeSet<u64>) -> std::io::Result<()> {
             Ok(r) => r,
             Err(_) => continue,
         };
+        chunks.push((index.len() as u64, base));
         for &pc in chunk {
             if let Ok(ip) = res.label_ip(&u.labels[&pc]) {
                 index.push((pc, ip));
@@ -674,13 +772,17 @@ fn build(img: &Image, profile: &BTreeSet<u64>) -> std::io::Result<()> {
     hdr.extend_from_slice(&flags_word().to_le_bytes());
     hdr.extend_from_slice(&(index.len() as u64).to_le_bytes());
     hdr.extend_from_slice(&(code.len() as u64).to_le_bytes());
+    hdr.extend_from_slice(&(chunks.len() as u64).to_le_bytes());
+    hdr.resize(HDR, 0);
     for (pc, off) in &index {
         hdr.extend_from_slice(&pc.to_le_bytes());
         hdr.extend_from_slice(&off.to_le_bytes());
     }
-    while hdr.len() < code_offset(index.len()) {
-        hdr.push(0);
+    for (first, off) in &chunks {
+        hdr.extend_from_slice(&first.to_le_bytes());
+        hdr.extend_from_slice(&off.to_le_bytes());
     }
+    hdr.resize(code_offset(index.len(), chunks.len()), 0);
     f.write_all(&hdr)?;
     f.write_all(&code)?;
     drop(f);
