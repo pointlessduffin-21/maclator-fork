@@ -305,6 +305,30 @@ fn read_profile(path: &std::path::Path) -> BTreeSet<u64> {
 
 /// Save this run's profile; if it contains new blocks, rebuild AOT files in
 /// a background (forked) process.
+extern "C" {
+    fn _NSGetArgc() -> *mut libc::c_int;
+    fn _NSGetArgv() -> *mut *mut *mut libc::c_char;
+}
+
+/// The builder is a fork of the guest's maclator, so `ps`, `pgrep -f` and the launcher's Running
+/// view would show it as the program still running (for minutes, after the program quit).
+/// Rewrite the argument strings in place (that is what KERN_PROCARGS2 reads back) so it reads
+/// "maclator: building translation cache" instead.
+unsafe fn retitle_builder() {
+    let argc = *_NSGetArgc() as usize;
+    let argv = *_NSGetArgv();
+    if argc == 0 || argv.is_null() {
+        return;
+    }
+    let start = *argv as *mut u8;
+    let last = *argv.add(argc - 1) as *mut u8;
+    let end = last.add(libc::strlen(last as *const libc::c_char));
+    let room = end.offset_from(start) as usize;
+    let title = b"maclator: building translation cache";
+    std::ptr::write_bytes(start, 0, room);
+    std::ptr::copy_nonoverlapping(title.as_ptr(), start, title.len().min(room));
+}
+
 pub fn save_profile() {
     if !ENABLED.load(Ordering::Relaxed) || SAVED.swap(true, Ordering::SeqCst) {
         return;
@@ -342,6 +366,7 @@ pub fn save_profile() {
     if !sync {
         unsafe {
             libc::setsid();
+            retitle_builder();
             let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
             libc::dup2(null, 0);
             libc::dup2(null, 1);
