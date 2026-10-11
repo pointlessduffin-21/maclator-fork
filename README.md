@@ -51,6 +51,10 @@ Tested on two Intel Macs: **A** = Core i5-4440 + AMD Radeon RX 460, macOS 26.7; 
 | `fastfetch`, `neatvi` | C | A | work | none |
 | AppKit calculator (`tests/guest/calc`) | AppKit | A | works | none |
 
+![The arm64-only ChatGPT desktop app answering a prompt on an Intel MacBook Pro, with About This Mac (Intel Core i5, Intel HD Graphics, macOS Tahoe 26.6) and the Maclator launcher showing the run](docs/img/chatgpt-arm64.png)
+
+*The arm64-only ChatGPT app running under Maclator on an Intel MacBook Pro (i5-10310U, Intel UHD, macOS 26.6), with the launcher showing the run.*
+
 ### Universal apps (their arm64 half, run under Maclator)
 
 | Program | Kind | Mac | Result | Conditions |
