@@ -65,6 +65,23 @@ Moving from mostly just-in-time translation to real **ahead-of-time** translatio
 and the arm64 shared cache once, before they run, the way Rosetta 2 does on Apple Silicon) is the next big step; the
 study of how to get there is in [docs/AOT-STUDY.md](docs/AOT-STUDY.md).
 
+## Next: the plan for speed
+
+From [docs/AOT-STUDY.md](docs/AOT-STUDY.md), which measured where first-launch time goes on the HP EliteBook 840 G7.
+Translation dominates a first launch (about 90 % of it in the general-purpose x86 assembler and `malloc`), and the
+existing translation cache covers far less than it seems. The plan, in order, each step measurable on its own:
+
+| Phase | What | Rough size | How we'll know it worked |
+|---|---|---|---|
+| 0 | **Fix the existing cache.** Cache universal (fat) libraries too; save profiles repeatedly, not once per process; pre-slide the shared cache once instead of in every process; let cached code chain like JIT code; load cache files lazily; forward `--no-aot` to child processes. | ~1 week | Termius' second launch translates a few thousand blocks instead of ~200 k; `hello` starts in about 0.5 s with ~10 MB instead of ~350 MB |
+| 1 | **A fast x86 emitter** in place of the general-purpose assembler library (iced-x86) in the JIT and the cache builder. | 2–4 weeks | under 15 µs per block (today 52–90 µs); AppCleaner's first window under 6 s from an empty cache |
+| 2 | **Translate before first launch**: `maclator --aot <App.app>` translates every arm64 binary in an app, in parallel, when the app is added in Maclator.app; plus a seed of commonly used shared-cache code per sysroot. | 2–3 weeks | a first launch within 1.5× of a warm one |
+| 3 | **A translation service** that owns the cache and shares translated code read-only between processes, so Chromium's helpers stop translating the same code again. | 1–2 months | total translation across an app's processes about equal to the main process alone |
+| 4 | **Better code from ahead-of-time translation**: register allocation across blocks, flag liveness, native call/return. | ongoing | `bench/bench.c` and the typing benchmarks in [docs/PERFORMANCE.md](docs/PERFORMANCE.md) |
+
+Translating Apple's whole arm64 shared cache ahead of time is not on the list: it holds about 2.95 GB of code (an
+hour of CPU and ~20 GB of output), and one app uses well under 1 % of it. Help on any phase is welcome.
+
 ## Quick start
 
 You need an Intel Mac on macOS 26 (Tahoe) with Xcode Command Line Tools and a Rust toolchain, about 10 GB of
