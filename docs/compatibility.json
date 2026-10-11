@@ -14,8 +14,8 @@
       "bundleID": "com.openai.codex",
       "verdict": "works",
       "note": "Chromium-based, arm64 only (no Intel version). Needs --no-sandbox; window after about 2 minutes on the first launch.",
-      "tested": "2026-10-02",
-      "firstWindow": 124
+      "tested": "2026-10-11",
+      "firstWindow": 102
     },
     {
       "name": "coconutBattery",
@@ -47,6 +47,14 @@
       "verdict": "works",
       "note": "C++/AppKit.",
       "firstWindow": 15,
+      "tested": "2026-10-02"
+    },
+    {
+      "name": "Ghostty",
+      "bundleID": "com.mitchellh.ghostty",
+      "verdict": "partial",
+      "note": "Opens a window and runs its event loop; whether the terminal draws is unconfirmed (it renders through CAMetalLayer, which the GPU bridge doesn't cover yet).",
+      "firstWindow": 8,
       "tested": "2026-10-02"
     },
     {
@@ -130,6 +138,13 @@
       "firstWindow": 16
     },
     {
+      "name": "OneDrive",
+      "bundleID": "com.microsoft.OneDrive",
+      "verdict": "partial",
+      "note": "Menu-bar app: starts and keeps running; no window to check.",
+      "tested": "2026-10-02"
+    },
+    {
       "name": "Pages",
       "bundleID": "com.apple.Pages",
       "verdict": "works",
@@ -142,6 +157,21 @@
       "bundleID": "com.pixelmatorteam.pixelmator.x",
       "verdict": "works",
       "note": "Relaunches itself on start; the second copy opens the window.",
+      "tested": "2026-10-02"
+    },
+    {
+      "name": "Pixelmator Pro Creator Studio",
+      "bundleID": "com.apple.pixelmator",
+      "verdict": "partial",
+      "note": "Opened a window, then quit with an error.",
+      "tested": "2026-10-11",
+      "firstWindow": 44
+    },
+    {
+      "name": "RDM",
+      "bundleID": "net.alkalay.RDM",
+      "verdict": "partial",
+      "note": "Menu-bar app: starts and stays running; the menu itself not checked yet.",
       "tested": "2026-10-02"
     },
     {
@@ -167,28 +197,6 @@
       "note": "Sandboxed. Remote sessions not checked.",
       "tested": "2026-10-02",
       "firstWindow": 11
-    },
-    {
-      "name": "Ghostty",
-      "bundleID": "com.mitchellh.ghostty",
-      "verdict": "partial",
-      "note": "Opens a window and runs its event loop; whether the terminal draws is unconfirmed (it renders through CAMetalLayer, which the GPU bridge doesn't cover yet).",
-      "firstWindow": 8,
-      "tested": "2026-10-02"
-    },
-    {
-      "name": "OneDrive",
-      "bundleID": "com.microsoft.OneDrive",
-      "verdict": "partial",
-      "note": "Menu-bar app: starts and keeps running; no window to check.",
-      "tested": "2026-10-02"
-    },
-    {
-      "name": "RDM",
-      "bundleID": "net.alkalay.RDM",
-      "verdict": "partial",
-      "note": "Menu-bar app: starts and stays running; the menu itself not checked yet.",
-      "tested": "2026-10-02"
     }
   ]
 }
