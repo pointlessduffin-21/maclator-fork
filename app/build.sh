@@ -79,6 +79,11 @@ if [ $BUNDLE = 1 ]; then
   mkdir -p "$OUT/Contents/Resources/bin/gpu"
   cp ../target/release/maclator "$OUT/Contents/Resources/bin/maclator"
   cp ../gpu/out/libmclbridge.dylib ../gpu/out/libmclmetal.dylib "$OUT/Contents/Resources/bin/gpu/"
+  # Hello.app, the built-in arm64 test (examples/hello-arm), shown in the Library and in Setup.
+  if [ -x ../examples/hello-arm/build.sh ]; then
+    ../examples/hello-arm/build.sh >/dev/null
+    cp -R ../examples/hello-arm/out/Hello.app "$OUT/Contents/Resources/"
+  fi
 fi
 codesign -f -s - "$OUT" >/dev/null 2>&1
 echo "built $PWD/$OUT"

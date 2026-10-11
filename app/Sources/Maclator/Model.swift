@@ -110,6 +110,8 @@ struct GuestApp: Identifiable, Hashable {
     let chromium: Bool
     /// Added by hand (Add apps… or a drop) rather than found in an Applications folder.
     var added = false
+    /// Hello.app, the arm64 test app that ships inside Maclator.app (examples/hello-arm).
+    var builtIn = false
     var id: String { url.path }
     var runnable: Bool { arches.contains(.arm64) }
 
@@ -162,13 +164,20 @@ struct GuestApp: Identifiable, Hashable {
         return dirs.filter { fm.fileExists(atPath: $0.path) }
     }
 
+    /// The built-in arm64 test app, when this build carries one (app/build.sh --bundle).
+    static var builtInTest: URL? {
+        guard let u = Bundle.main.resourceURL?.appending(path: "Hello.app"), FileManager.default.fileExists(atPath: u.path) else { return nil }
+        return u
+    }
+
     static func scan(added: [URL] = []) -> [GuestApp] {
         var seen = Set<String>()
         var apps: [GuestApp] = []
-        func consider(_ url: URL, added: Bool) {
+        func consider(_ url: URL, added: Bool, builtIn: Bool = false) {
             let real = url.resolvingSymlinksInPath().path
             guard seen.insert(real).inserted, var app = load(url), app.bundleID != Bundle.main.bundleIdentifier else { return }
             app.added = added
+            app.builtIn = builtIn
             apps.append(app)
         }
         for dir in folders() {
@@ -178,6 +187,9 @@ struct GuestApp: Identifiable, Hashable {
         }
         for url in added where FileManager.default.fileExists(atPath: url.path) {
             consider(url, added: true)
+        }
+        if let hello = builtInTest {
+            consider(hello, added: false, builtIn: true)
         }
         return apps.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }

@@ -301,6 +301,7 @@ struct AppRow: View {
                 if app.sandboxed { Chip("sandboxed") }
                 if app.electron { Chip("electron") } else if app.chromium { Chip("chromium") }
                 if app.added { Chip("added") }
+                if app.builtIn { Chip("built-in test") }
             }
             StatusLine(health: launcher.session(for: app)?.isLive == true ? .live : entry.verdict.health,
                        text: launcher.session(for: app)?.isLive == true ? "Running" : (app.runnable ? entry.verdict.label : "Intel only"))
@@ -337,6 +338,7 @@ struct AppDetail: View {
                     if app.sandboxed { Chip("sandboxed") }
                     if app.electron { Chip("electron") } else if app.chromium { Chip("chromium") }
                     if app.added { Chip("added") }
+                if app.builtIn { Chip("built-in test") }
                     Spacer(minLength: 0)
                     if app.added {
                         Button { launcher.remove(app) } label: { Text("Remove") }
@@ -665,6 +667,7 @@ struct SetupView: View {
                         CheckRow(ok: i.homebrew != nil, optional: true, title: "Homebrew (arm64)", detail: i.homebrew != nil ? "/opt/homebrew · use the brew in ~/bin" : "Optional. See docs/USAGE.md, Homebrew.")
                     }
                 }
+                ArmTestPane()
                 HStack(spacing: 14) {
                     Pane { KPI(label: "Translation cache", value: ByteCountFormatter.string(fromByteCount: i.aotBytes, countStyle: .file), note: "speeds up later launches") }
                     Pane { KPI(label: "This Mac", value: "\(ProcessInfo.processInfo.processorCount) threads", note: cpuModel()) }
@@ -687,6 +690,54 @@ func cpuModel() -> String {
     sysctlbyname("machdep.cpu.brand_string", &buf, &size, nil, 0)
     return String(cString: buf).replacingOccurrences(of: "(R)", with: "").replacingOccurrences(of: "(TM)", with: "")
         .components(separatedBy: " CPU").first ?? ""
+}
+
+/// Setup's one-click proof that translation works: run the built-in arm64 Hello.app.
+struct ArmTestPane: View {
+    @EnvironmentObject var launcher: Launcher
+
+    private var hello: GuestApp? { launcher.apps.first(where: \.builtIn) }
+
+    var body: some View {
+        Pane(title: "Test it") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Hello.app is a small app built for Apple silicon only, carried inside Maclator. If it opens and greets you with “Hello, I am ARM.”, arm64 apps run on this Mac. It also lists what it sees: architecture, CPU, OS and memory.")
+                    .font(Paper.sans(13.5)).foregroundStyle(Paper.ink2).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 12) {
+                    if let app = hello {
+                        if let s = launcher.session(for: app), s.isLive {
+                            Button { s.stop() } label: { Text("Stop") }.buttonStyle(PaperButtonStyle(kind: .danger))
+                        } else {
+                            Button { launcher.launch(app) } label: { ArrowLabel("Run the arm64 test") }
+                                .buttonStyle(PaperButtonStyle(kind: .ink))
+                                .disabled(!launcher.install.ready)
+                        }
+                        if let s = launcher.session(for: app) { ArmTestStatus(session: s) }
+                    } else {
+                        StatusLine(health: .down, text: "Not in this build (app/build.sh --bundle adds it)")
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct ArmTestStatus: View {
+    @ObservedObject var session: Session
+    var body: some View {
+        switch session.state {
+        case .starting:
+            StatusLine(health: .warn, text: "Starting… the first launch translates as it goes")
+        case .running:
+            StatusLine(health: .live, text: "Running: window after \(Int((session.firstWindow ?? 0).rounded())) s")
+        case .exited(let s):
+            StatusLine(health: session.firstWindow != nil ? .ok : .err, text: session.firstWindow != nil ? "Worked: it opened a window" : "Quit before a window (status \(s)); see Running")
+        case .signaled:
+            StatusLine(health: session.firstWindow != nil ? .ok : .down, text: session.firstWindow != nil ? "Worked: it opened a window" : "Stopped")
+        case .failed(let e):
+            StatusLine(health: .err, text: e)
+        }
+    }
 }
 
 struct CheckRow: View {
